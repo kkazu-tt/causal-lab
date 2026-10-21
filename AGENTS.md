@@ -18,6 +18,7 @@
 | `R/setup.R` | 各ページが最初に読む。図の見た目と `record()` |
 | `scripts/check_results.py` | 推定値が想定の範囲に入るか、R と Python が一致するかを確かめる |
 | `scripts/check_live.py` | ヘッドレスの Chrome で各ページの「Run Code」を全部押し、ブラウザの中の例が動くかを確かめる |
+| `scripts/wrangler.sh` | wrangler を動かし、出力のメールアドレスを伏せる（認証エラーで wrangler が持ち主のメールを出すため。CI の wrangler はすべてこれを通す） |
 | `scripts/serve.py` | `_site` を手元で配る（標準の http.server は同時の読み込みで接続がリセットされる） |
 | `_extensions/r-wasm/live` | quarto-live（ブラウザの中の R と Python）。CI は毎回最新のリリースで置き換える |
 | `DESCRIPTION` / `pyproject.toml` | CI が入れる R と Python のパッケージの一覧（版は固定しない） |

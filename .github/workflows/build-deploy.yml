@@ -96,7 +96,7 @@ jobs:
       - name: wrangler の空実行
         run: |
           npm ci --ignore-scripts
-          npx wrangler deploy --dry-run
+          scripts/wrangler.sh deploy --dry-run
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
@@ -106,6 +106,7 @@ jobs:
           retention-days: 7
 
   # Cloudflare の合鍵を使うのは deploy と rollback だけ。どちらも lockfile で固定した wrangler しか動かさない
+  # （出力のメールアドレスは scripts/wrangler.sh が伏せる。公開のリポジトリでは Actions のログを誰でも読める）
   # （npm ci --ignore-scripts で、インストール時のスクリプトも走らせない）。R・Python・playwright は合鍵の無いジョブで動かす。
   # 公開は main からの実行だけ（ブランチを指定した手動の起動では配備しない）。
   deploy:
@@ -145,7 +146,7 @@ jobs:
           for wait in 0 30 90; do
             sleep "$wait"
             # 工程のシェルは -e で動くので、読み取りの失敗でループが終わらないようにする。
-            version="$(npx wrangler deployments status --json | jq -r '.versions[0].version_id')" || version=""
+            version="$(scripts/wrangler.sh deployments status --json | jq -r '.versions[0].version_id')" || version=""
             [[ "$version" =~ ^[0-9a-f-]{36}$ ]] && break
           done
           [[ "$version" =~ ^[0-9a-f-]{36}$ ]] || { echo "::error::本番で動いている版を読めません（${version}）"; exit 1; }
@@ -161,7 +162,7 @@ jobs:
         run: |
           for wait in 0 120 300; do
             sleep "$wait"
-            npx wrangler deploy --message "CI: ${GITHUB_SHA::7}" && exit 0
+            scripts/wrangler.sh deploy --message "CI: ${GITHUB_SHA::7}" && exit 0
           done
           exit 1
 
@@ -230,7 +231,7 @@ jobs:
           BEFORE: ${{ needs.deploy.outputs.before }}
         run: |
           set -uo pipefail
-          serving() { npx wrangler deployments status --json | jq -r '.versions[0].version_id'; }
+          serving() { scripts/wrangler.sh deployments status --json | jq -r '.versions[0].version_id'; }
           now="$(serving)" || now=""
           if [ "$now" = "$BEFORE" ]; then
             echo "本番は配備の前の版（${BEFORE}）のまま。"
@@ -238,12 +239,12 @@ jobs:
           fi
           for wait in 0 30 90; do
             sleep "$wait"
-            npx wrangler rollback "$BEFORE" -y -m "CI: 本番の確認に落ちたので戻した（${GITHUB_SHA::7}）" || continue
+            scripts/wrangler.sh rollback "$BEFORE" -y -m "CI: 本番の確認に落ちたので戻した（${GITHUB_SHA::7}）" || continue
             after="$(serving)" || after=""
             if [ "$after" = "$BEFORE" ]; then
               echo "::error::何が起きたか：配備した版（${now:-読めず}）が本番の確認を通らなかったので、配備の前の版（${BEFORE}）に戻しました。対応：この実行のログで落ちた工程を読み、直してから配備し直します。"
               exit 0
             fi
           done
-          echo "::error::何が起きたか：配備した版（${now:-読めず}）が本番の確認を通らず、配備の前の版（${BEFORE}）へ戻す処理も3回とも失敗しました。本番は確認に落ちた版のままの可能性があります。対応：npx wrangler rollback ${BEFORE} -y で戻し、本番を確かめます。"
+          echo "::error::何が起きたか：配備した版（${now:-読めず}）が本番の確認を通らず、配備の前の版（${BEFORE}）へ戻す処理も3回とも失敗しました。本番は確認に落ちた版のままの可能性があります。対応：scripts/wrangler.sh rollback ${BEFORE} -y で戻し、本番を確かめます。"
           exit 1
