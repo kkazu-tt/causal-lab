@@ -1,0 +1,252 @@
+---
+title: "マッチングと傾向スコアの重み付け"
+subtitle: "処置群と似た比較群を作り、観察データから処置の効果を推定する"
+format: live-html
+engine: knitr
+---
+
+{{< include ../_extensions/r-wasm/live/_knitr.qmd >}}
+
+```{r}
+#| include: false
+source("R/setup.R")
+library(MatchIt)
+library(WeightIt)
+library(marginaleffects)
+library(cobalt)
+col_third <- "#1baf7a"
+```
+
+## 何を推定するか
+
+処置を受けた群の平均処置効果（ATT）を推定する。観察データでは、処置を受けた人と受けなかった人が処置の前から違うので、結果の単純な差は効果と前からの違いが混ざる。マッチングと重み付けは、観察された共変量の分布が処置群と同じになるように比較群を選び直す、または重みを付け直して、この違いを取り除く。
+
+傾向スコアは、共変量 $X$ のもとで処置を受ける確率 $e(X) = P(T = 1 \mid X)$ である。共変量の代わりに傾向スコアをそろえれば足りる（Rosenbaum and Rubin 1983）。ATT の重み付けでは、処置群に1、比較群に $e(X) / (1 - e(X))$ の重みを付ける。処置群に似た比較群の人ほど重くなる。
+
+## 識別の仮定
+
+- **無交絡（条件付き独立）**：観察された共変量をそろえれば、処置の割り当ては結果の潜在的な値と独立になる。共変量に入っていない交絡があれば成り立たない。データからは確かめられない。
+- **重なり（positivity）**：どの共変量の値の人にも、処置を受ける人と受けない人の両方がいる。ATT なら、処置群の人に似た比較群の人がいれば足りる。
+- **SUTVA**：ある人の処置が、ほかの人の結果に影響しない。
+
+## 実データの例：職業訓練と所得
+
+`MatchIt` パッケージの `lalonde` は、職業訓練の実験（National Supported Work Demonstration、NSW）で訓練を受けた185人に、一般の世帯の調査（PSID）から取った429人を比較群として付けたデータである（LaLonde 1986; Dehejia and Wahba 1999）。結果は1978年の所得（ドル）、共変量は年齢・教育年数・人種・婚姻・高校の卒業資格の有無と、訓練の前の1974年と1975年の所得である。
+
+このデータの価値は、答えの目安があることにある。同じ185人を、実験で無作為に訓練から外された260人と比べた推定値は1,794ドルだった（Dehejia and Wahba 1999）。観察データの比較群を使った方法が、この実験の値にどこまで近づくかを見られる。
+
+```{r}
+data(lalonde, package = "MatchIt")
+f <- treat ~ age + educ + race + married + nodegree + re74 + re75
+
+# 単純な差と、共変量を入れた回帰
+naive <- lm(re78 ~ treat, data = lalonde)
+reg <- lm(re78 ~ treat + age + educ + race + married + nodegree + re74 + re75, data = lalonde)
+
+# 傾向スコアの最近傍マッチング（1対1、非復元）。マッチ後に共変量との交互作用を入れて回帰し、
+# 処置群について平均の差を取る。標準誤差はペアでクラスターする
+m <- matchit(f, data = lalonde, method = "nearest", distance = "glm")
+md <- match.data(m)
+fit_m <- lm(re78 ~ treat * (age + educ + race + married + nodegree + re74 + re75),
+            data = md, weights = weights)
+att_m <- avg_comparisons(fit_m, variables = "treat", vcov = ~subclass,
+                         newdata = subset(md, treat == 1))
+
+# 傾向スコアの ATT の重み付け（IPW）。標準誤差は重みの推定も含めて計算する
+w <- weightit(f, data = lalonde, method = "glm", estimand = "ATT")
+fit_w <- lm_weightit(re78 ~ treat, data = lalonde, weightit = w)
+```
+
+```{r}
+#| echo: false
+est <- data.frame(
+  推定量 = c("単純な差", "回帰による調整", "最近傍マッチング＋回帰", "IPW（ATT の重み）", "参考：実験の推定（Dehejia and Wahba 1999）"),
+  推定値 = c(coef(naive)[["treat"]], coef(reg)[["treat"]], att_m$estimate, coef(fit_w)[["treat"]], 1794),
+  標準誤差 = c(sqrt(diag(vcov(naive)))[["treat"]], sqrt(diag(vcov(reg)))[["treat"]], att_m$std.error,
+              sqrt(diag(vcov(fit_w)))[["treat"]], 633)
+)
+knitr::kable(est, digits = 0, format.args = list(big.mark = ","))
+```
+
+単純な差は負で、訓練を受けた人の方が所得が低く見える。訓練を受けた人は、もともと所得が低い人たちだったからである。共変量で調整すると、どの方法も正になる。
+
+### バランスを確かめる
+
+調整がうまくいったかは、推定値ではなく共変量のバランスで判断する。目安は、標準化平均差（処置群と比較群の平均の差を標準偏差で割ったもの）の絶対値が0.1未満であることである。
+
+```{r}
+#| fig-height: 4.2
+#| fig-cap: "共変量ごとの標準化平均差（絶対値）。破線は目安の0.1。"
+bt_w <- bal.tab(w, un = TRUE, stats = "m", binary = "std")$Balance
+bt_m <- bal.tab(m, un = TRUE, stats = "m", binary = "std")$Balance
+labels <- c(age = "年齢", educ = "教育年数", race_black = "黒人", race_hispan = "ヒスパニック",
+            race_white = "白人", married = "既婚", nodegree = "高校の卒業資格なし",
+            re74 = "1974年の所得", re75 = "1975年の所得")
+vars <- names(labels)
+bal <- rbind(
+  data.frame(var = vars, method = "調整前", smd = abs(bt_w[vars, "Diff.Un"])),
+  data.frame(var = vars, method = "最近傍マッチング", smd = abs(bt_m[vars, "Diff.Adj"])),
+  data.frame(var = vars, method = "IPW（ATT の重み）", smd = abs(bt_w[vars, "Diff.Adj"]))
+)
+bal$var <- factor(labels[bal$var], levels = rev(labels))
+bal$method <- factor(bal$method, levels = c("調整前", "最近傍マッチング", "IPW（ATT の重み）"))
+ggplot(bal, aes(smd, var, colour = method, shape = method)) +
+  geom_vline(xintercept = 0.1, linetype = "dashed", linewidth = 0.3) +
+  geom_point(size = 2.5) +
+  scale_colour_manual(values = c(col_main, col_second, col_third)) +
+  labs(x = "標準化平均差（絶対値）", y = NULL, colour = NULL, shape = NULL)
+```
+
+最近傍マッチングでは、人種の差がほとんど縮まっていない。訓練を受けた人の多くは黒人だが、PSID の比較群には黒人が少なく、1対1で重複なしに選ぶと似た人を見つけきれないからである。IPW では、すべての共変量で差が `r sprintf("%.2f", max(abs(bt_w[vars, "Diff.Adj"])))` 以下まで縮んだ。このため、このページの見出しの推定値には IPW を使う。
+
+IPW の推定値は `r format(round(coef(fit_w)[["treat"]]), big.mark = ",")` ドルで、実験の1,794ドルより小さいが、95%信頼区間は実験の値を含む。ただし、重みを付けたあとの比較群の有効標本サイズは `r round(summary(w)$effective.sample.size[2, "Control"])` 人で、429人のうち処置群に似たごく一部の人が推定を担っている。
+
+### Python で同じ重み付けをする
+
+::: {.panel-tabset}
+
+## Python
+
+```{python}
+import numpy as np
+import statsmodels.formula.api as smf
+
+# R の MatchIt::lalonde を reticulate でそのまま受け取る
+df = r.lalonde
+ps = smf.logit(
+    "treat ~ age + educ + C(race) + married + nodegree + re74 + re75", data=df
+).fit(disp=0).predict(df)
+
+# ATT の重み：処置群は1、比較群は p / (1 - p)
+t = (df["treat"] == 1).to_numpy()
+w = np.where(t, 1.0, ps / (1 - ps))
+y = df["re78"].to_numpy()
+ipw_py = np.average(y[t], weights=w[t]) - np.average(y[~t], weights=w[~t])
+print(f"IPW（ATT の重み）: {ipw_py:,.2f} ドル")
+```
+
+## R（同じ計算を手で）
+
+```{r}
+ps <- fitted(glm(f, data = lalonde, family = binomial))
+wt <- ifelse(lalonde$treat == 1, 1, ps / (1 - ps))
+ipw_r <- with(lalonde, weighted.mean(re78[treat == 1], wt[treat == 1]) -
+                       weighted.mean(re78[treat == 0], wt[treat == 0]))
+sprintf("IPW（ATT の重み）: %s ドル", format(round(ipw_r, 2), big.mark = ",", nsmall = 2))
+```
+
+:::
+
+statsmodels のロジットで推定した傾向スコアから作った重みは、R の `glm` から作った重みと同じになり、推定値も `WeightIt` の値と一致する。
+
+```{r}
+#| include: false
+record(
+  "matching",
+  method = "マッチングと傾向スコアの重み付け",
+  page = "methods/matching.html",
+  data = "MatchIt::lalonde（NSW の処置群185人と PSID の比較群429人）",
+  question = "職業訓練は1978年の所得を増やしたか（観察データの比較群で）",
+  estimand = "ATT",
+  estimate = coef(fit_w)[["treat"]],
+  se = sqrt(diag(vcov(fit_w)))[["treat"]],
+  estimator = "傾向スコアの ATT の重み付け（WeightIt）",
+  naive = coef(naive)[["treat"]],
+  regression = coef(reg)[["treat"]],
+  matching = att_m$estimate,
+  benchmark = 1794,
+  ipw = ipw_r,
+  ipw_python = reticulate::py$ipw_py,
+  # glm のロジットは決定的に解けるので、いまの推定値（1,214ドル）の近く。外れたら CI が公開を止める
+  expect = c(1205, 1225)
+)
+```
+
+## ブラウザで試す：交絡と重なり
+
+スライダーを動かすと、ブラウザの中の R（webR）がデータを作り直して推定する。「交絡の強さ」は共変量 $X$ が結果を動かす大きさ、「重なりの悪さ」は $X$ が処置を決める強さである。$X$ が処置の受けやすさと結果の両方を動かすと、単純な差は本当の効果（1）からずれる。傾向スコアで重みを付けると戻る。ただし、$X$ が処置をほぼ決めてしまう（重なりが悪い）と、比較群のごく一部に大きな重みが集まり、有効標本サイズが縮んで推定が不安定になる。図では、傾向スコアの分布を処置群は上に、比較群は下に描いた。
+
+```{ojs}
+//| echo: false
+viewof conf = Inputs.range([0, 3], {value: 1.5, step: 0.1, label: "交絡の強さ"})
+viewof sep = Inputs.range([0.5, 4], {value: 1.5, step: 0.25, label: "重なりの悪さ"})
+```
+
+```{webr}
+#| autorun: true
+#| fig-width: 7
+#| fig-height: 4
+#| input:
+#|   - conf
+#|   - sep
+set.seed(3)
+n <- 2000
+x <- rnorm(n)
+treat <- rbinom(n, 1, plogis(-1 + sep * x))
+y <- 1 + 1 * treat + conf * x + rnorm(n) # 本当の効果は1
+
+naive <- mean(y[treat == 1]) - mean(y[treat == 0])
+ps <- fitted(glm(treat ~ x, family = binomial))
+w <- ifelse(treat == 1, 1, ps / (1 - ps))
+ipw <- weighted.mean(y[treat == 1], w[treat == 1]) - weighted.mean(y[treat == 0], w[treat == 0])
+ess <- sum(w[treat == 0])^2 / sum(w[treat == 0]^2)
+cat(sprintf("本当の効果: 1  単純な差: %.2f  IPW: %.2f\n比較群の重みの最大: %.1f  比較群の有効標本サイズ: %d / %d\n",
+            naive, ipw, max(w[treat == 0]), round(ess), sum(treat == 0)))
+
+# 傾向スコアの分布。処置群は上、比較群は下に描く
+br <- seq(0, 1, by = 0.05)
+n1 <- hist(ps[treat == 1], breaks = br, plot = FALSE)$counts
+n0 <- hist(ps[treat == 0], breaks = br, plot = FALSE)$counts
+ticks <- pretty(c(-max(n0), max(n1)))
+plot(NULL, xlim = c(0, 1), ylim = range(ticks), yaxt = "n", xlab = "傾向スコア", ylab = "人数")
+axis(2, at = ticks, labels = abs(ticks))
+rect(head(br, -1), 0, br[-1], n1, col = "#2a78d6", border = "white")
+rect(head(br, -1), -n0, br[-1], 0, col = "#eb6834", border = "white")
+abline(h = 0)
+text(1, max(ticks), "処置群", adj = c(1, 1))
+text(1, min(ticks), "比較群", adj = c(1, 0))
+```
+
+同じことを Python（ブラウザの中の Pyodide）でも試せる。数字を書き換えて「Run Code」を押す。
+
+```{pyodide}
+import numpy as np
+import statsmodels.api as sm
+
+conf, sep = 1.5, 3.0  # 交絡の強さと、重なりの悪さ（X が処置を決める強さ）
+rng = np.random.default_rng(3)
+n = 2000
+x = rng.normal(size=n)
+treat = rng.binomial(1, 1 / (1 + np.exp(-(-1 + sep * x))))
+y = 1 + 1 * treat + conf * x + rng.normal(size=n)  # 本当の効果は1
+
+ps = sm.Logit(treat, sm.add_constant(x)).fit(disp=0).predict()
+w = np.where(treat == 1, 1.0, ps / (1 - ps))
+t = treat == 1
+naive = y[t].mean() - y[~t].mean()
+ipw = np.average(y[t], weights=w[t]) - np.average(y[~t], weights=w[~t])
+ess = w[~t].sum() ** 2 / (w[~t] ** 2).sum()
+print(f"本当の効果: 1  単純な差: {naive:.2f}  IPW: {ipw:.2f}")
+print(f"比較群の重みの最大: {w[~t].max():.1f}  比較群の有効標本サイズ: {ess:.0f} / {(~t).sum()}")
+```
+
+## 落とし穴
+
+- **無交絡は検定できない。** バランスがそろうのは観察された共変量だけで、観察されない交絡は残りうる。lalonde でも、比較群の選び方や共変量の組み方で推定値が大きく動くことが示されている（Smith and Todd 2005）。
+- **重なりを先に確かめる。** 傾向スコアが0や1に近い人がいると、重みが極端になり、少数の人で推定が決まる。重なりのある範囲に絞る方法もある（Crump, Hotz, Imbens, and Mitnik 2009）が、その場合は推定の対象の集団が変わる。
+- **バランスは検定の p 値ではなく、標準化平均差で見る。** p 値は標本の大きさで変わり、比較群を減らすだけで「有意でない」にできてしまう（Imai, King, and Stuart 2008）。
+- **傾向スコアでのマッチングは、かえってバランスを悪くすることがある。** 傾向スコアだけで組を作ると、共変量そのものは似ていない組が混ざる（King and Nielsen 2019）。マハラノビス距離や完全一致を組み合わせる方法、重み付けの方法も比べる。
+- **マッチング後の標準誤差には注意が要る。** 組を作ったことによる依存を無視すると誤る。復元ありのマッチングでは Abadie and Imbens (2006) の分散を使い、ブートストラップは使えない（Abadie and Imbens 2008）。組でクラスターした標準誤差も使える（Abadie and Spiess 2022）。
+
+## 参考文献
+
+- Abadie, A., & Imbens, G. W. (2006). Large sample properties of matching estimators for average treatment effects. *Econometrica*, 74(1), 235–267.
+- Abadie, A., & Imbens, G. W. (2008). On the failure of the bootstrap for matching estimators. *Econometrica*, 76(6), 1537–1557.
+- Abadie, A., & Spiess, J. (2022). Robust post-matching inference. *Journal of the American Statistical Association*, 117(538), 983–995.
+- Crump, R. K., Hotz, V. J., Imbens, G. W., & Mitnik, O. A. (2009). Dealing with limited overlap in estimation of average treatment effects. *Biometrika*, 96(1), 187–199.
+- Dehejia, R. H., & Wahba, S. (1999). Causal effects in nonexperimental studies: Reevaluating the evaluation of training programs. *Journal of the American Statistical Association*, 94(448), 1053–1062.
+- Imai, K., King, G., & Stuart, E. A. (2008). Misunderstandings between experimentalists and observationalists about causal inference. *Journal of the Royal Statistical Society: Series A*, 171(2), 481–502.
+- King, G., & Nielsen, R. (2019). Why propensity scores should not be used for matching. *Political Analysis*, 27(4), 435–454.
+- LaLonde, R. J. (1986). Evaluating the econometric evaluations of training programs with experimental data. *American Economic Review*, 76(4), 604–620.
+- Rosenbaum, P. R., & Rubin, D. B. (1983). The central role of the propensity score in observational studies for causal effects. *Biometrika*, 70(1), 41–55.
+- Smith, J. A., & Todd, P. E. (2005). Does matching overcome LaLonde's critique of nonexperimental estimators? *Journal of Econometrics*, 125(1–2), 305–353.
