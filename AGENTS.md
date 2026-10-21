@@ -22,6 +22,8 @@
 | `_extensions/r-wasm/live` | quarto-live（ブラウザの中の R と Python）。CI は毎回最新のリリースで置き換える |
 | `DESCRIPTION` / `pyproject.toml` | CI が入れる R と Python のパッケージの一覧（版は固定しない） |
 | `wrangler.jsonc` / `package.json` | Cloudflare への配備。wrangler だけは版を固定し、Dependabot が上げる |
+| `_analytics.html` | Cloudflare Web Analytics の読み込み（全ページに入る）。token は公開の値 |
+| `LICENSES/` | 同梱している quarto-live と lucide のライセンスの全文 |
 
 ## ページの規約
 
@@ -61,7 +63,8 @@ uv run --no-project --with playwright python scripts/check_live.py http://127.0.
 
 ## 公開と並行作業
 
-- 公開は CI（`.github/workflows/build-deploy.yml`）だけが行う。配備のジョブは描画のジョブと分け、Cloudflare の合鍵（secret の `CLOUDFLARE_API_TOKEN`・`CLOUDFLARE_ACCOUNT_ID`）はそこにだけ渡す。本番の確認に落ちたら配備の前の版に戻す
+- 公開は CI（`.github/workflows/build-deploy.yml`）だけが、main からの実行のときに行う。ジョブは build（R・Python・playwright。合鍵なし）→ deploy（合鍵あり。lockfile で固定した wrangler だけ）→ verify（合鍵なし。本番の environment.html が成果物と同じかと check_live.py）→ rollback（合鍵あり。deploy か verify が落ちたときだけ、控えた版に戻し、戻ったかを確かめる）。合鍵は secret の `CLOUDFLARE_API_TOKEN`・`CLOUDFLARE_ACCOUNT_ID`
+- Python のパッケージは CI で公開から3日たった版だけを使う（`UV_EXCLUDE_NEWER`）。R のパッケージにはこの待ちが無い
 - 手元からの配備（`npx wrangler deploy`、サンドボックスの外）は、CI が使えないときの非常手段に限る
 - main への直接の push で運用する。push の前に `quarto render` と2つの検査を手元で通す
 - ステージは自分が触ったパスを名指しする。検証が済んだ作業はすぐにコミットする

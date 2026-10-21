@@ -17,6 +17,10 @@ on:
 permissions:
   contents: read
 
+env:
+  # Python のパッケージは公開から3日たった版だけを使う（公開直後に見つかる悪意ある版を避ける。持ち主の方針）。
+  UV_EXCLUDE_NEWER: "3 days"
+
 concurrency:
   group: deploy-${{ github.event_name == 'pull_request' && github.ref || 'main' }}
   cancel-in-progress: false
@@ -83,22 +87,34 @@ jobs:
           python3 scripts/serve.py 8765 &
           uv run --no-project --with playwright python scripts/check_live.py http://127.0.0.1:8765
 
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          package-manager-cache: false
+          node-version: "22"
+
+      # 合鍵なしで wrangler を空実行し、設定と _site を読めるかを確かめる（Dependabot の wrangler の PR もここで試される）。
+      - name: wrangler の空実行
+        run: |
+          npm ci --ignore-scripts
+          npx wrangler deploy --dry-run
+
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        if: github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         with:
           name: site
           path: _site
           retention-days: 7
 
-  # R と Python を動かしたジョブとは分け、Cloudflare の合鍵はこのジョブにだけ渡す。ここでは作ったサイトを配るだけで、
-  # パッケージのコードは動かさない（npm ci は wrangler だけ）。
+  # Cloudflare の合鍵を使うのは deploy と rollback だけ。どちらも lockfile で固定した wrangler しか動かさない
+  # （npm ci --ignore-scripts で、インストール時のスクリプトも走らせない）。R・Python・playwright は合鍵の無いジョブで動かす。
+  # 公開は main からの実行だけ（ブランチを指定した手動の起動では配備しない）。
   deploy:
-    if: github.event_name != 'pull_request'
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     needs: build
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    env:
-      URL: https://causal-lab.kkazu.workers.dev
+    timeout-minutes: 20
+    outputs:
+      before: ${{ steps.before.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -114,10 +130,8 @@ jobs:
           package-manager-cache: false
           node-version: "22"
 
-      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
-
       - name: wrangler を入れる
-        run: npm ci
+        run: npm ci --ignore-scripts
 
       # 配備か本番の確認が落ちたときに戻す先として、いま本番で動いている版を控える（配備はいつも100%）。
       - name: 配備の前の版を控える
@@ -140,7 +154,7 @@ jobs:
 
       # Cloudflare の API はしばらく 5xx を返すことがある（owndraft、2026-10-12）。同じものを上げ直しても害はないので3回まで試す。
       - name: 配備
-        id: deploy
+        timeout-minutes: 12
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
@@ -151,39 +165,85 @@ jobs:
           done
           exit 1
 
-      # 配備できたと記録されても、本番に届いていないことがある。新しい版が届いたかと、本番でもブラウザの中の例が動くかを確かめる。
+  # 配備できたと記録されても、本番に届いていないことがある。合鍵を持たないジョブで、本番の実行環境のページが
+  # この実行で作ったものと1バイトも違わないか（作り直した日時が毎回変わるので、毎週の作り直しでも前の版と見分けられる）と、
+  # 本番でもブラウザの中の例が動くかを確かめる。
+  verify:
+    needs: deploy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      URL: https://causal-lab.kkazu.workers.dev
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: site
+          path: _site
+
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+
+      # 工程の上限に掛かれば、この工程が失敗になり rollback が動く（ジョブの上限だと取り消しになり、動かない）。
       - name: 本番を確かめる
-        id: measure
+        timeout-minutes: 15
         run: |
           set -uo pipefail
           for wait in 0 15 30 60; do
             sleep "$wait"
-            if curl -fsSL "${URL}/environment.html" | grep -q "${GITHUB_SHA::7}"; then
-              echo "${URL} に ${GITHUB_SHA::7} の版が届きました。"
+            # 一致すれば cmp が最後まで読むので curl も 0 で終わる。違えば cmp か curl が 0 以外を返す。
+            if curl -fsSL "${URL}/environment.html" | cmp -s - _site/environment.html; then
+              echo "${URL} にこの実行で作った版（${GITHUB_SHA::7}）が届きました。"
               uv run --no-project --with playwright python scripts/check_live.py "$URL"
               exit $?
             fi
           done
-          echo "::error::本番の実行環境のページに ${GITHUB_SHA::7} が出ません。"
+          echo "::error::本番の実行環境のページが、この実行で作ったもの（${GITHUB_SHA::7}）と一致しません。"
           exit 1
 
-      # 配備か本番の確認が落ち、本番の版が控えと違えば（失敗と記録されても新しい版が出ていることがある）、控えた版に戻す。
-      # 実行は失敗のまま終わるので、report-failure.yml が Issue を立てる。
+  # 配備か本番の確認が落ち、本番の版が控えと違えば（失敗と記録されても新しい版が出ていることがある）、控えた版に戻す。
+  # 実行は失敗のまま終わるので、report-failure.yml が Issue を立てる。
+  rollback:
+    needs: [deploy, verify]
+    if: ${{ !cancelled() && needs.deploy.outputs.before != '' && (needs.deploy.result == 'failure' || needs.verify.result == 'failure') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          package-manager-cache: false
+          node-version: "22"
+
+      - name: wrangler を入れる
+        run: npm ci --ignore-scripts
+
       - name: 配備の前の版に戻す
-        if: ${{ !cancelled() && steps.before.outputs.version != '' && (steps.deploy.outcome == 'failure' || steps.measure.outcome == 'failure') }}
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          BEFORE: ${{ steps.before.outputs.version }}
+          BEFORE: ${{ needs.deploy.outputs.before }}
         run: |
           set -uo pipefail
-          now="$(npx wrangler deployments status --json | jq -r '.versions[0].version_id')" || now=""
+          serving() { npx wrangler deployments status --json | jq -r '.versions[0].version_id'; }
+          now="$(serving)" || now=""
           if [ "$now" = "$BEFORE" ]; then
             echo "本番は配備の前の版（${BEFORE}）のまま。"
             exit 0
           fi
           for wait in 0 30 90; do
             sleep "$wait"
-            npx wrangler rollback "$BEFORE" -y -m "CI: 本番の確認に落ちたので戻した（${GITHUB_SHA::7}）" && break
+            npx wrangler rollback "$BEFORE" -y -m "CI: 本番の確認に落ちたので戻した（${GITHUB_SHA::7}）" || continue
+            after="$(serving)" || after=""
+            if [ "$after" = "$BEFORE" ]; then
+              echo "::error::何が起きたか：配備した版（${now:-読めず}）が本番の確認を通らなかったので、配備の前の版（${BEFORE}）に戻しました。対応：この実行のログで落ちた工程を読み、直してから配備し直します。"
+              exit 0
+            fi
           done
-          echo "::error::何が起きたか：配備した版（${now}）が本番の確認を通らなかったので、配備の前の版（${BEFORE}）に戻しました。対応：この実行のログで落ちた工程を読み、直してから配備し直します。"
+          echo "::error::何が起きたか：配備した版（${now:-読めず}）が本番の確認を通らず、配備の前の版（${BEFORE}）へ戻す処理も3回とも失敗しました。本番は確認に落ちた版のままの可能性があります。対応：npx wrangler rollback ${BEFORE} -y で戻し、本番を確かめます。"
+          exit 1

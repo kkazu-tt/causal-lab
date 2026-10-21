@@ -1,2 +1,3 @@
-<!-- Cloudflare Web Analytics（Cookie を使わない利用の集計）。token は公開の値で、秘密ではない -->
-<script type="module" src="https://static.cloudflareinsights.com/beacon.min.js" data-cf-beacon='{"token": "5c193548a70d4b58bb24b30c6cf167f3"}'></script>
+<!-- Cloudflare Web Analytics（Cookie を使わない利用の集計）。token は公開の値で、秘密ではない。
+     spa: false で、ページ内の見出しへの移動を閲覧として数えさせない（ページごとに読み込むサイトなので） -->
+<script type="module" src="https://static.cloudflareinsights.com/beacon.min.js" data-cf-beacon='{"token": "5c193548a70d4b58bb24b30c6cf167f3", "spa": false}'></script>

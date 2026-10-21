@@ -25,7 +25,10 @@ https://causal-lab.kkazu.workers.dev
 
 - コード（R・Python・スクリプト、ページの中のコード片を含む）は MIT（[LICENSE](LICENSE)）
 - ページの文章と図は [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/deed.ja)
-- データは各 R パッケージのライセンスに、`_extensions/` の quarto-live はその作者のライセンスに従う
+- データは各 R パッケージのライセンスに従う
+- `_extensions/r-wasm/live` は [quarto-live](https://github.com/r-wasm/quarto-live)（MIT、全文は [LICENSES/quarto-live.md](LICENSES/quarto-live.md)）
+- トップページのアイコンは [lucide](https://lucide.dev)（ISC、一部は Feather 由来の MIT。全文は [LICENSES/lucide.txt](LICENSES/lucide.txt)）
+- ルートの [LICENSE](LICENSE) は、上の2つを除くこのリポジトリのコードに適用する
 
 ## 自動で回るもの
 

@@ -34,7 +34,7 @@ website:
       - href: environment.qmd
         text: 実行環境
   page-footer:
-    left: "コードは [GitHub](https://github.com/kkazu-tt/causal-lab) で公開（MIT）。文章と図は [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/deed.ja)。毎週、最新の R・Python で作り直しています。利用の集計に Cloudflare Web Analytics（Cookie を使わない）を使っています。"
+    left: "コードは [GitHub](https://github.com/kkazu-tt/causal-lab) で公開（MIT。同梱の quarto-live と lucide は [各ライセンス](https://github.com/kkazu-tt/causal-lab/tree/main/LICENSES)）。文章と図は [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/deed.ja)。毎週、最新の R・Python で作り直しています。利用の集計に Cloudflare Web Analytics（Cookie を使わない）を使っています。"
 
 format:
   html:
