@@ -1,0 +1,192 @@
+---
+title: "回帰不連続デザイン（RD）"
+subtitle: "閾値をわずかに上回った単位と、わずかに下回った単位を比べて効果を推定する"
+format: live-html
+engine: knitr
+---
+
+{{< include ../_extensions/r-wasm/live/_knitr.qmd >}}
+
+```{r}
+#| include: false
+source("R/setup.R")
+library(rdrobust)
+library(rddensity)
+```
+
+## 何を推定するか
+
+割当変数（ランニング変数）が閾値を超えると処置が決まる場面で、閾値ちょうどでの処置効果を推定する。閾値の右から近づいたときの結果の期待値と、左から近づいたときの期待値の差である。閾値の両側の単位は割当変数がほぼ同じなので、処置の有無以外は似ていると考える。
+
+## 識別の仮定
+
+- **連続性**：処置がなかったとしたら、結果の条件付き期待値は閾値で跳ばない。閾値で跳ぶのは処置のせいだけだと仮定する。
+- **割当変数を精密には操作できない**：単位が自分の値を閾値のすぐ上に合わせられるなら、閾値の両側で顔ぶれが変わる。値に偶然のぶれが残るなら、閾値の付近は局所的にランダムに割り当てたのに近くなる（Lee 2008）。
+- **閾値で他の制度が同時に変わらない**：同じ閾値で別の処置も始まると、効果を区別できない。
+
+## 実データの例：上院選での政党の優位
+
+`rdrobust` パッケージの `rdrobust_RDsenate` は、1914〜2010年の米上院選のデータで、Cattaneo, Frandsen, and Titiunik (2015) が作ったものの抜粋である。割当変数は t 回目の選挙での民主党の得票差（`margin`、0 を超えれば民主党の勝ち）、結果は t+2 回目の選挙での民主党の得票率（`vote`）である。接戦でわずかに勝った場合と、わずかに負けた場合を比べ、議席を取ったことがその後の得票を押し上げるか（政党の優位）を見る。
+
+```{r}
+data(rdrobust_RDsenate, package = "rdrobust")
+summary(rdrobust_RDsenate[, c("margin", "vote")])
+```
+
+### 局所線形の推定
+
+::: {.panel-tabset}
+
+## R
+
+```{r}
+# 既定: 閾値は 0、局所線形（p = 1）、三角カーネル、MSE を最小にする帯域
+rd <- rdrobust(y = rdrobust_RDsenate$vote, x = rdrobust_RDsenate$margin)
+summary(rd)
+```
+
+## Python
+
+```{python}
+from rdrobust import rdrobust
+
+# R で読んだデータを reticulate でそのまま受け取る
+senate = r.rdrobust_RDsenate
+rd_py = rdrobust(y=senate["vote"], x=senate["margin"])
+print(rd_py.coef)
+print(rd_py.ci)
+```
+
+Python 版の `rdrobust` は R 版と同じ作者のもので、推定値と帯域は R と一致する。
+
+:::
+
+```{r}
+#| include: false
+rd_est <- rd$coef[["Conventional", 1]]
+rd_se_robust <- rd$se[["Robust", 1]]
+rd_ci_robust <- unname(rd$ci["Robust", ])
+rd_h <- rd$bws[["h", "left"]]
+record(
+  "rd",
+  method = "回帰不連続デザイン（RD）",
+  page = "methods/rd.html",
+  data = "rdrobust::rdrobust_RDsenate（米上院選、1914〜2010年）",
+  question = "接戦で議席を取ると、t+2 回目の選挙で民主党の得票率は上がるか",
+  estimand = "閾値での処置効果（得票率のポイント）",
+  estimate = rd_est,
+  se = rd_se_robust,
+  ci_robust = rd_ci_robust,
+  estimator = "局所線形・MSE 最適の帯域（rdrobust）。標準誤差と信頼区間は頑健なバイアス補正",
+  estimate_python = reticulate::py$rd_py$coef[["Coeff"]][[1]],
+  bandwidth = rd_h,
+  bandwidth_python = reticulate::py$rd_py$bws[["left"]][[1]],
+  # Cattaneo, Frandsen, and Titiunik (2015) の例で知られる値（約7.4ポイント）の近く。外れたら CI が公開を止める
+  expect = c(7.3, 7.5)
+)
+```
+
+民主党が接戦でわずかに勝つと、t+2 回目の選挙での民主党の得票率はおよそ `r round(rd_est, 1)` ポイント高い。頑健なバイアス補正の95%信頼区間は [`r round(rd_ci_robust[1], 1)`, `r round(rd_ci_robust[2], 1)`] で、0 を含まない。推定に使ったのは、得票差が ±`r round(rd_h, 1)` ポイントの内側の選挙である。
+
+### 閾値の前後の平均
+
+```{r}
+#| fig-cap: "得票差の区間ごとの平均（点）と、両側に別々に当てはめた4次の多項式（線）。rdplot の既定で描いた見取り図で、推定には使っていない。"
+bins <- rdplot(rdrobust_RDsenate$vote, rdrobust_RDsenate$margin, hide = TRUE)
+fit <- bins$vars_poly
+ggplot() +
+  geom_vline(xintercept = 0, linetype = "dashed", linewidth = 0.3) +
+  geom_point(
+    data = bins$vars_bins, aes(rdplot_mean_x, rdplot_mean_y),
+    colour = col_main, size = 1.8
+  ) +
+  geom_line(data = fit[fit$rdplot_x < 0, ], aes(rdplot_x, rdplot_y), colour = col_main, linewidth = 0.7) +
+  geom_line(data = fit[fit$rdplot_x > 0, ], aes(rdplot_x, rdplot_y), colour = col_main, linewidth = 0.7) +
+  labs(x = "t 回目の選挙での民主党の得票差（ポイント）", y = "t+2 回目の民主党の得票率（%）")
+```
+
+### 割当変数の操作の検定
+
+```{r}
+# 閾値の両側で、割当変数の密度が跳んでいないかを見る（Cattaneo, Jansson, and Ma 2020）
+dens <- rddensity(X = rdrobust_RDsenate$margin)
+dens$test$p_jk
+```
+
+p 値は `r round(dens$test$p_jk, 2)` で、閾値での密度の跳びは検出されない。ただし、跳びが無いことは操作が無いことの証明にはならない。
+
+## ブラウザで試す：帯域を広げると
+
+作ったデータで、閾値での本当の効果は 5 にしてある。結果は割当変数に対して曲がっていて、曲がり方は閾値の左右で違う。帯域を変えるたびに、同じ設定のデータを200回作り直して推定し、推定値の平均・偏り・ぶれ（標準偏差）・RMSE を出す。帯域を3まで狭めると標準偏差は3を超え、50まで広げると直線では曲がりを表しきれず、偏りが2.5を超える。図は1回分のデータで、青い線が帯域の内側での局所線形の当てはめ、点線が帯域の端である。
+
+```{ojs}
+//| echo: false
+viewof h = Inputs.range([3, 50], {value: 15, step: 1, label: "帯域（閾値からの幅）"})
+```
+
+```{webr}
+#| autorun: true
+#| fig-width: 7
+#| fig-height: 4
+#| input:
+#|   - h
+set.seed(3)
+tau <- 5 # 閾値での本当の効果
+m <- function(x) ifelse(x < 0, 50 + 0.25 * x + 0.006 * x^2, 50 + 0.25 * x - 0.004 * x^2)
+draw <- function() {
+  x <- runif(1000, -50, 50)
+  data.frame(x = x, d = x >= 0, y = m(x) + tau * (x >= 0) + rnorm(1000, sd = 5))
+}
+local_linear <- function(s, h) {
+  w <- pmax(0, 1 - abs(s$x) / h) # 三角カーネル
+  coef(lm(y ~ d * x, data = s, weights = w))[["dTRUE"]]
+}
+
+est <- replicate(200, local_linear(draw(), h))
+print(round(c(平均 = mean(est), 偏り = mean(est) - tau, 標準偏差 = sd(est), RMSE = sqrt(mean((est - tau)^2))), 2))
+
+s <- draw()
+plot(s$x, s$y, pch = 16, cex = 0.4, col = "#c3c2b7", xlab = "割当変数", ylab = "結果")
+for (side in c(FALSE, TRUE)) {
+  k <- s$d == side & abs(s$x) <= h
+  f <- lm(y ~ x, data = s[k, ], weights = 1 - abs(x) / h)
+  xs <- seq(if (side) 0 else -h, if (side) h else 0, length.out = 50)
+  lines(xs, predict(f, data.frame(x = xs)), col = "#2a78d6", lwd = 3)
+}
+abline(v = c(-h, 0, h), lty = c(3, 2, 3))
+```
+
+同じ推定を Python（ブラウザの中の Pyodide）で1回だけ試せる。帯域 `h` を書き換えて「Run Code」を押す。
+
+```{pyodide}
+import numpy as np
+import pandas as pd
+import statsmodels.formula.api as smf
+
+h, tau = 15, 5  # 帯域と、閾値での本当の効果
+rng = np.random.default_rng(3)
+x = rng.uniform(-50, 50, 1000)
+m = np.where(x < 0, 50 + 0.25 * x + 0.006 * x**2, 50 + 0.25 * x - 0.004 * x**2)
+s = pd.DataFrame({"x": x, "d": (x >= 0).astype(int), "y": m + tau * (x >= 0) + rng.normal(0, 5, 1000)})
+
+s["w"] = np.clip(1 - np.abs(s["x"]) / h, 0, None)  # 三角カーネル
+inside = s[s["w"] > 0]
+est = smf.wls("y ~ d * x", data=inside, weights=inside["w"]).fit().params["d"]
+print(f"帯域 {h}: 推定値 {est:.2f}（本当の効果 {tau}）、使った観測 {len(inside)} 件")
+```
+
+## 落とし穴
+
+- **割当変数が操作されていると、閾値の両側を比べられない。** 閾値のすぐ上に観測が集まっていれば疑う。密度の跳びの検定がある（McCrary 2008; Cattaneo, Jansson, and Ma 2020、R の `rddensity`）。
+- **全域に高次の多項式を当てはめない。** 閾値から遠い観測に大きな重みがかかり、推定値がぶれ、信頼区間の被覆率も悪くなる（Gelman and Imbens 2019）。局所線形か局所2次にする。
+- **MSE 最適の帯域で、通常の信頼区間を使わない。** その帯域では偏りが残るので、通常の区間は狭すぎる。偏りを補正し、その不確実さも含めた頑健な信頼区間を使う（Calonico, Cattaneo, and Titiunik 2014）。
+- **推定値は閾値での局所的な効果である。** この例なら接戦の選挙についての効果で、大差の選挙にそのまま当てはまるとは言えない。
+
+## 参考文献
+
+- Calonico, S., Cattaneo, M. D., & Titiunik, R. (2014). Robust nonparametric confidence intervals for regression-discontinuity designs. *Econometrica*, 82(6), 2295–2326.
+- Cattaneo, M. D., Frandsen, B. R., & Titiunik, R. (2015). Randomization inference in the regression discontinuity design: An application to party advantages in the U.S. Senate. *Journal of Causal Inference*, 3(1), 1–24.
+- Cattaneo, M. D., Jansson, M., & Ma, X. (2020). Simple local polynomial density estimators. *Journal of the American Statistical Association*, 115(531), 1449–1455.
+- Gelman, A., & Imbens, G. (2019). Why high-order polynomials should not be used in regression discontinuity designs. *Journal of Business & Economic Statistics*, 37(3), 447–456.
+- Lee, D. S. (2008). Randomized experiments from non-random selection in U.S. House elections. *Journal of Econometrics*, 142(2), 675–697.
+- McCrary, J. (2008). Manipulation of the running variable in the regression discontinuity design: A density test. *Journal of Econometrics*, 142(2), 698–714.
