@@ -11,6 +11,9 @@ project:
 
 lang: ja
 
+# 利用の集計（Cloudflare Web Analytics）。全ページの本文の末尾に入れる
+include-after-body: _analytics.html
+
 website:
   title: "因果推論ラボ"
   description: "因果推論・計量政治・計量経済の手法を、R と Python の実例で確かめるダッシュボード"
@@ -31,7 +34,7 @@ website:
       - href: environment.qmd
         text: 実行環境
   page-footer:
-    left: "コードは [GitHub](https://github.com/kkazu-tt/causal-lab) で公開（MIT）。文章と図は [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/deed.ja)。毎週、最新の R・Python で作り直しています。"
+    left: "コードは [GitHub](https://github.com/kkazu-tt/causal-lab) で公開（MIT）。文章と図は [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/deed.ja)。毎週、最新の R・Python で作り直しています。利用の集計に Cloudflare Web Analytics（Cookie を使わない）を使っています。"
 
 format:
   html:

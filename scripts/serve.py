@@ -12,6 +12,11 @@ class Server(http.server.ThreadingHTTPServer):
     request_queue_size = 128
 
 
+class QuietHandler(http.server.SimpleHTTPRequestHandler):
+    def log_message(self, *args):
+        pass  # 1ページで数十件の要求が出て、検査のログが読めなくなるため
+
+
 port = int(sys.argv[1]) if len(sys.argv) > 1 else 8765
-handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory="_site")
+handler = functools.partial(QuietHandler, directory="_site")
 Server(("127.0.0.1", port), handler).serve_forever()
