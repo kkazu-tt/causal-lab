@@ -1,0 +1,295 @@
+---
+title: "コンジョイント実験"
+subtitle: "候補者の属性を無作為に組み合わせて見せ、どの属性が選ばれやすさを変えるかを推定する"
+format: live-html
+engine: knitr
+---
+
+{{< include ../_extensions/r-wasm/live/_knitr.qmd >}}
+
+```{r}
+#| include: false
+source("R/setup.R")
+library(estimatr)
+```
+
+::: {.callout-note}
+このページのデータは、効果の大きさを先に決めて R で作ったもの（シミュレーション）である。実在の調査の結果ではない。本当の値が分かっているので、推定がそれを取り戻せるかを確かめられる。
+:::
+
+## 何を推定するか
+
+回答者に2人の候補者を見せて、どちらを選ぶかを答えてもらう。候補者の属性（性別・年齢・職業・所属政党・重点政策）は、課題ごとに無作為に組み合わせる。これを1人に何回か繰り返す。
+
+推定するのは平均限界構成要素効果（AMCE）である。ある属性の水準を基準の水準から変えたとき、その候補者が選ばれる確率が平均でどれだけ変わるかを表す。平均は、ほかの属性の組み合わせの分布と回答者についてとる（Hainmueller, Hopkins, and Yamamoto 2014）。
+
+## 識別の仮定
+
+- **属性は無作為に割り当てる。** 各属性が互いに独立に、決めた確率で割り当てられていれば、AMCE は水準のダミーへの単純な回帰で推定できる。「70代で新人」のようなありえない組み合わせを除くなら、除いた制約を推定に反映させる必要がある。
+- **課題の順番や、候補者が左右どちらに出たかで答えが変わらない。** 前の課題の影響が残る（持ち越し効果）と、課題をまとめて扱えなくなる。
+- **回答者は課題ごとに独立ではない。** 同じ人が何度も答えるので、標準誤差は回答者でクラスターする。
+
+## 実データの代わりの例：候補者選択の実験
+
+回答者1,000人が5課題ずつ答え、各課題で2人の候補者のどちらかを選ぶ。候補者のプロフィールは全部で `r format(2 * 5 * 1000, big.mark = ",")` 件になる。
+
+所属政党だけは、回答者の支持政党によって評価が分かれるようにした。与党支持者は与党の候補を好み、野党第一党の候補を嫌う。野党支持者はその逆で、無所属の候補もやや好む。ほかの属性の効果は全員に共通である。
+
+```{r}
+set.seed(20261021)
+
+levels_list <- list(
+  gender = c("男性", "女性"),
+  age = c("40代", "30代", "60代", "70代"),
+  job = c("会社員", "地方議員", "弁護士", "官僚", "タレント"),
+  party = c("無所属", "与党", "野党第一党"),
+  policy = c("経済成長", "子育て支援", "防衛力強化", "脱原発")
+)
+
+# 全員に共通の効果（選ばれる確率の差。先頭が基準の水準）
+true_value <- list(
+  gender = c(0, 0.03),
+  age = c(0, 0.02, -0.03, -0.08),
+  job = c(0, 0.05, 0.03, 0.01, -0.04),
+  policy = c(0, 0.08, -0.02, 0)
+)
+# 所属政党の評価は、回答者の支持政党で分かれる
+party_value <- rbind(
+  与党支持 = c(無所属 = 0, 与党 = 0.10, 野党第一党 = -0.05),
+  野党支持 = c(無所属 = 0.05, 与党 = -0.05, 野党第一党 = 0.10)
+)
+
+n_resp <- 1000
+supporter <- sample(rownames(party_value), n_resp, replace = TRUE)
+
+# 行は「回答者 × 課題 × 候補者（2人）」。候補者の属性を独立に無作為に割り当てる
+d <- expand.grid(profile = 1:2, task = 1:5, resp_id = 1:n_resp)
+for (a in names(levels_list)) {
+  d[[a]] <- factor(sample(levels_list[[a]], nrow(d), replace = TRUE), levels = levels_list[[a]])
+}
+d$supporter <- supporter[d$resp_id]
+
+# 候補者の価値 = 共通の効果の和 + 支持政党ごとの政党の評価
+value <- party_value[cbind(d$supporter, as.character(d$party))]
+for (a in names(true_value)) {
+  value <- value + true_value[[a]][as.integer(d[[a]])]
+}
+
+# 1人目が選ばれる確率 = 0.5 + 2人の価値の差（2人目はその残り）
+first <- rbinom(nrow(d) / 2, 1, 0.5 + value[d$profile == 1] - value[d$profile == 2])
+d$chosen <- as.vector(rbind(first, 1 - first))
+
+head(d[, c("resp_id", "task", "profile", "gender", "age", "job", "party", "policy", "chosen")])
+```
+
+### AMCE の推定
+
+属性を独立に無作為に割り当てているので、選ばれたか（1・0）を全属性の水準のダミーに回帰すれば、各係数が AMCE になる。
+
+::: {.panel-tabset}
+
+## R
+
+```{r}
+amce <- lm_robust(
+  chosen ~ gender + age + job + party + policy,
+  data = d, clusters = resp_id, se_type = "stata" # 回答者でクラスター
+)
+tidy(amce)[-1, c("term", "estimate", "std.error", "conf.low", "conf.high")]
+```
+
+## Python
+
+```{python}
+import statsmodels.formula.api as smf
+
+# R で作ったデータを reticulate で受け取る。factor は pandas の Categorical になり、先頭の水準が基準になる
+d = r.d
+amce_py = smf.ols("chosen ~ gender + age + job + party + policy", data=d).fit(
+    cov_type="cluster", cov_kwds={"groups": d["resp_id"]}
+)
+print(amce_py.summary2().tables[1].iloc[1:, :4].round(4))
+```
+
+係数と標準誤差は、R の `estimatr`（`se_type = "stata"`）と一致する。
+
+:::
+
+```{r}
+#| include: false
+headline <- "policy子育て支援"
+record(
+  "conjoint",
+  method = "コンジョイント実験",
+  page = "methods/conjoint.html",
+  data = "シミュレーション（回答者1,000人 × 5課題 × 候補者2人）",
+  question = "重点政策を「経済成長」から「子育て支援」に変えると、候補者は選ばれやすくなるか（本当の値は 0.08）",
+  estimand = "AMCE",
+  estimate = unname(coef(amce)[headline]),
+  se = unname(amce$std.error[headline]),
+  estimator = "OLS・回答者でクラスターした標準誤差（estimatr）",
+  estimate_python = unname(reticulate::py$amce_py$params[["policy[T.子育て支援]"]]),
+  se_python = unname(reticulate::py$amce_py$bse[["policy[T.子育て支援]"]]),
+  # 乱数の種を固定したこのデータでの推定値（0.0711）の前後。R の乱数か推定の計算が変わったら CI が公開を止める
+  expect = c(0.068, 0.074)
+)
+```
+
+```{r}
+#| fig-height: 5
+#| fig-cap: "各属性の水準を、基準の水準（男性・40代・会社員・無所属・経済成長）から変えたときの AMCE。線は95%信頼区間。"
+attr_label <- c(gender = "性別", age = "年齢", job = "職業", party = "所属政党", policy = "重点政策")
+
+# 本当の AMCE。所属政党は、支持政党を半々の確率で割り当てたので、両群の平均（与党も野党第一党も 0）
+true_amce <- c(
+  unlist(lapply(true_value, `[`, -1)),
+  colMeans(party_value)[-1] - mean(party_value[, "無所属"])
+)
+truth <- data.frame(
+  term = c(
+    unlist(lapply(names(true_value), function(a) paste0(a, levels_list[[a]][-1]))),
+    paste0("party", levels_list$party[-1])
+  ),
+  value = unname(true_amce)
+)
+
+est <- tidy(amce)[-1, ]
+attr_of <- sub("^(gender|age|job|party|policy).*", "\\1", est$term)
+est$label <- paste0(attr_label[attr_of], "：", substring(est$term, nchar(attr_of) + 1))
+est$label <- factor(est$label, levels = rev(est$label))
+truth$label <- est$label[match(truth$term, est$term)]
+est$true <- truth$value[match(est$term, truth$term)]
+covered <- with(est, conf.low <= true & true <= conf.high)
+
+ggplot(est, aes(y = label)) +
+  geom_vline(xintercept = 0, linewidth = 0.3) +
+  geom_errorbarh(aes(xmin = conf.low, xmax = conf.high, colour = "推定値"), height = 0, linewidth = 0.6) +
+  geom_point(aes(x = estimate, colour = "推定値"), size = 2.5) +
+  geom_point(data = truth, aes(x = value, colour = "本当の値"), shape = 5, size = 2.5, stroke = 1) +
+  scale_colour_manual(values = c(推定値 = col_main, 本当の値 = col_second), name = NULL) +
+  labs(x = "選ばれる確率の変化（AMCE）", y = NULL)
+```
+
+`r nrow(est)` 個の水準のうち `r sum(covered)` 個で、95%信頼区間が本当の値を含む。95%信頼区間なら、20個に1個ほどは外れるのが想定どおりである。たとえば重点政策を「子育て支援」にした候補者は、「経済成長」の候補者より選ばれる確率が `r round(100 * coef(amce)[["policy子育て支援"]], 1)` ポイント高い（本当の値は8ポイント）。
+
+所属政党の AMCE はほぼ0である。しかし、これは「回答者が政党を気にしていない」ことを意味しない。次の節で見るように、与党支持者と野党支持者が逆向きに強く反応していて、平均すると打ち消し合っているだけである。
+
+### 下位集団の比較は限界平均で
+
+限界平均（marginal mean）は、ある水準を持つ候補者が選ばれた割合である。2人から1人を選ぶ形なので、どの属性も気にされていなければ0.5になる。基準の水準を決めずに読めるので、下位集団どうしを比べるのに向く（Leeper, Hobolt, and Tilley 2020）。
+
+```{r}
+#| fig-height: 3.4
+#| fig-cap: "支持政党ごとの、候補者の所属政党の限界平均と95%信頼区間。0.5 は「気にしない」の目安。"
+mm <- do.call(rbind, lapply(rownames(party_value), function(g) {
+  fit <- lm_robust(chosen ~ 0 + party, data = d[d$supporter == g, ], clusters = resp_id, se_type = "stata")
+  data.frame(supporter = g, level = levels_list$party, tidy(fit)[, c("estimate", "conf.low", "conf.high")])
+}))
+mm$level <- factor(mm$level, levels = levels_list$party)
+
+ggplot(mm, aes(level, estimate, colour = supporter)) +
+  geom_hline(yintercept = 0.5, linewidth = 0.3) +
+  geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0, linewidth = 0.6,
+                position = position_dodge(width = 0.4)) +
+  geom_point(size = 2.5, position = position_dodge(width = 0.4)) +
+  scale_colour_manual(values = c(与党支持 = col_main, 野党支持 = col_second), name = NULL) +
+  labs(x = "候補者の所属政党", y = "選ばれた割合（限界平均）")
+```
+
+```{r}
+#| echo: false
+amce_by <- sapply(rownames(party_value), function(g) {
+  fit <- lm_robust(chosen ~ gender + age + job + party + policy,
+                   data = d[d$supporter == g, ], clusters = resp_id, se_type = "stata")
+  coef(fit)[["party野党第一党"]]
+})
+mm_opp <- setNames(mm$estimate[mm$level == "野党第一党"], mm$supporter[mm$level == "野党第一党"])
+data.frame(
+  指標 = c("AMCE（野党第一党 − 無所属）", "限界平均（野党第一党）"),
+  与党支持 = c(amce_by[["与党支持"]], mm_opp[["与党支持"]]),
+  野党支持 = c(amce_by[["野党支持"]], mm_opp[["野党支持"]])
+) |>
+  transform(差 = 野党支持 - 与党支持) |>
+  knitr::kable(digits = 3)
+```
+
+野党第一党の候補への評価の差を、AMCE の差で測ると `r round(amce_by[["野党支持"]] - amce_by[["与党支持"]], 3)`、限界平均の差で測ると `r round(mm_opp[["野党支持"]] - mm_opp[["与党支持"]], 3)` になる。AMCE は基準の水準（無所属）との差なので、2つの群で無所属への評価が違うと（ここでは野党支持者が無所属をやや好む）、その違いが AMCE の差に混ざる。基準の水準を変えれば、AMCE の差の大きさも符号も変わりうる。
+
+## ブラウザで試す：回答者の数と信頼区間の幅
+
+スライダーを動かすと、ブラウザの中の R（webR）が重点政策だけの実験を作り直して推定する（ほかの属性は省いた）。回答者を4倍にすると、信頼区間の幅はおよそ半分になる。
+
+```{ojs}
+//| echo: false
+viewof n_resp = Inputs.range([100, 2000], {value: 500, step: 100, label: "回答者の数"})
+viewof true_amce = Inputs.range([0, 0.15], {value: 0.08, step: 0.01, label: "子育て支援の本当の AMCE"})
+```
+
+```{webr}
+#| autorun: true
+#| fig-width: 7
+#| fig-height: 2.4
+#| input:
+#|   - n_resp
+#|   - true_amce
+set.seed(3)
+d <- expand.grid(profile = 1:2, task = 1:5, resp = 1:n_resp)
+d$x <- rbinom(nrow(d), 1, 0.5) # 1 = 子育て支援、0 = 経済成長
+first <- rbinom(nrow(d) / 2, 1, 0.5 + true_amce * (d$x[d$profile == 1] - d$x[d$profile == 2]))
+d$chosen <- as.vector(rbind(first, 1 - first))
+
+# 回答者でクラスターした標準誤差（小標本の補正は省く）
+fit <- lm(chosen ~ x, data = d)
+X <- model.matrix(fit)
+bread <- solve(crossprod(X))
+score <- rowsum(X * resid(fit), d$resp)
+se <- sqrt((bread %*% crossprod(score) %*% bread)[2, 2])
+est <- coef(fit)[["x"]]
+cat(sprintf("推定した AMCE: %.3f  95%%信頼区間: [%.3f, %.3f]  幅: %.3f\n",
+            est, est - 1.96 * se, est + 1.96 * se, 2 * 1.96 * se))
+
+par(mar = c(4, 1, 1, 1))
+plot(est, 1, xlim = c(-0.1, 0.3), ylim = c(0.6, 1.5), pch = 19, col = "#2a78d6",
+     yaxt = "n", xlab = "子育て支援の AMCE", ylab = "")
+segments(est - 1.96 * se, 1, est + 1.96 * se, 1, col = "#2a78d6", lwd = 2)
+abline(v = 0)
+abline(v = true_amce, lty = 2, col = "#eb6834")
+text(est, 0.8, "推定値と95%信頼区間")
+text(true_amce, 1.35, "本当の値", pos = 4)
+```
+
+同じことを Python（ブラウザの中の Pyodide）でも試せる。数字を書き換えて「Run Code」を押す。
+
+```{pyodide}
+import numpy as np
+import pandas as pd
+import statsmodels.formula.api as smf
+
+n_resp, true_amce = 500, 0.08  # 回答者の数と、子育て支援の本当の AMCE
+rng = np.random.default_rng(3)
+x = rng.integers(0, 2, size=(n_resp * 5, 2))  # 各課題の候補者2人の政策（1 = 子育て支援）
+first = rng.binomial(1, 0.5 + true_amce * (x[:, 0] - x[:, 1]))
+d = pd.DataFrame({
+    "resp": np.repeat(np.arange(n_resp), 5 * 2),
+    "x": x.ravel(),
+    "chosen": np.column_stack([first, 1 - first]).ravel(),
+})
+
+fit = smf.ols("chosen ~ x", data=d).fit(cov_type="cluster", cov_kwds={"groups": d["resp"]})
+lo, hi = fit.conf_int().loc["x"]
+print(f"推定した AMCE: {fit.params['x']:.3f}  95%信頼区間: [{lo:.3f}, {hi:.3f}]  幅: {hi - lo:.3f}")
+```
+
+## 落とし穴
+
+- **AMCE は、属性の組み合わせの分布に依存する。** ほかの属性についての平均なので、実験で使った割り当ての確率が変われば AMCE も変わる。現実の候補者の分布に近い割り当てにするか、分布を変えたときの AMCE を推定し直す（de la Cuesta, Egami, and Imai 2022）。
+- **AMCE は「多数派の選好」ではない。** 少数の回答者が強く反応すると、多数派が逆の選好を持っていても AMCE は正になりうる。上の所属政党の例のように、逆向きの強い選好が打ち消し合って0になることもある（Abramson, Koçak, and Magazinnik 2022）。
+- **下位集団どうしを AMCE の差で比べない。** AMCE の差は基準の水準への評価の差を含み、基準の水準の選び方で変わる。限界平均の差で比べる（Leeper, Hobolt, and Tilley 2020）。
+- **標準誤差は回答者でクラスターする。** 1人が何課題も答えるので、プロフィールを独立に扱うと標準誤差が小さく出すぎる。
+
+## 参考文献
+
+- Abramson, S. F., Koçak, K., & Magazinnik, A. (2022). What do we learn about voter preferences from conjoint experiments? *American Journal of Political Science*, 66(4), 1008–1020.
+- de la Cuesta, B., Egami, N., & Imai, K. (2022). Experimental design and statistical inference for conjoint analysis: The essential role of population distribution. *Political Analysis*, 30(1), 19–45.
+- Hainmueller, J., Hopkins, D. J., & Yamamoto, T. (2014). Causal inference in conjoint analysis: Understanding multidimensional choices via stated preference experiments. *Political Analysis*, 22(1), 1–30.
+- Leeper, T. J., Hobolt, S. B., & Tilley, J. (2020). Measuring subgroup preferences in conjoint experiments. *Political Analysis*, 28(2), 207–221.
