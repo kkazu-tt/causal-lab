@@ -1,0 +1,227 @@
+---
+title: "操作変数法（IV）"
+subtitle: "処置を動かすが結果には直接効かない変数を使い、交絡があっても効果を推定する"
+format: live-html
+engine: knitr
+---
+
+{{< include ../_extensions/r-wasm/live/_knitr.qmd >}}
+
+```{r}
+#| include: false
+source("R/setup.R")
+library(fixest)
+```
+
+## 何を推定するか
+
+処置（ここでは価格）が結果（消費量）に与える効果を推定する。処置と結果の両方に効く要因が観察できないと、回帰の係数は効果と交絡を混ぜたものになる。操作変数は、処置を動かすが、処置を通じてしか結果に効かない変数である。操作変数が処置を動かした分だけを使えば、交絡を含まない変化から効果を推定できる。操作変数と処置が1つずつなら、2段階最小二乗法（2SLS）の推定値は「操作変数が結果を動かした大きさ ÷ 操作変数が処置を動かした大きさ」になる。
+
+## 識別の仮定
+
+- **関連性**：操作変数が処置を十分に動かす。第1段階（処置を操作変数に回帰したもの）で確かめられる。
+- **除外制約**：操作変数は処置を通じてしか結果に効かない。データでは確かめられず、背景知識で論じるしかない。
+- **独立性**：操作変数は、結果に効く観察できない要因と無関係である（無作為に割り当てられたのと同じ）。
+- **単調性**：操作変数が処置を逆向きに動かす単位がいない。効果が単位ごとに違うとき、推定値の解釈に要る（下の「落とし穴」）。
+
+## 実データの例：たばこの価格と需要
+
+`AER` パッケージの `CigarettesSW` は、米国本土の48州のたばこの消費量と価格を1985年と1995年について集めたデータで、Stock and Watson (2007) の第12章の例である。1995年の州の断面で、1人あたりの箱数（対数）を実質価格（対数）に回帰すると、価格の効果に需要側の要因が混ざる。需要が多い州では価格も高くなりやすいからである。そこで、教科書と同じく、州の一般売上税（売上税を含む税からたばこ税を引いた額、消費者物価指数で実質化）を操作変数にする。売上税は州の財政の都合で決まり、たばこの需要とは価格を通じてしか関係しない、と仮定する。
+
+```{r}
+data("CigarettesSW", package = "AER")
+cig <- subset(CigarettesSW, year == "1995")
+cig <- transform(cig,
+  lpacks = log(packs),                         # 1人あたりの箱数（対数）
+  lrprice = log(price / cpi),                  # 実質価格（対数）
+  lrincome = log(income / population / cpi),   # 1人あたりの実質所得（対数）
+  salestax = (taxs - tax) / cpi                # 実質の一般売上税（1箱あたりドル）
+)
+summary(cig[c("lpacks", "lrprice", "salestax")])
+```
+
+### OLS と 2SLS の推定
+
+::: {.panel-tabset}
+
+## R
+
+```{r}
+# 標準誤差は不均一分散に頑健なもの（HC1）
+ols <- feols(lpacks ~ lrprice, data = cig, vcov = "hetero")
+iv <- feols(lpacks ~ 1 | lrprice ~ salestax, data = cig, vcov = "hetero")
+iv_income <- feols(lpacks ~ lrincome | lrprice ~ salestax,
+                   data = cig, vcov = "hetero")
+
+# 第1段階の F は頑健な Wald 統計量（ivwald）で見る
+etable(ols, iv, iv_income, fitstat = ~ n + ivwald, se.below = TRUE)
+```
+
+## Python
+
+```{python}
+from linearmodels.iv import IV2SLS
+
+# R で作ったデータを reticulate でそのまま受け取る
+cig = r.cig
+iv_py = IV2SLS.from_formula(
+    "lpacks ~ 1 + [lrprice ~ salestax]", data=cig
+).fit(cov_type="robust")
+iv_income_py = IV2SLS.from_formula(
+    "lpacks ~ 1 + lrincome + [lrprice ~ salestax]", data=cig
+).fit(cov_type="robust")
+print(iv_py.summary.tables[1])
+print(iv_py.first_stage.diagnostics[["partial.rsquared", "f.stat"]])
+```
+
+係数は R の `fixest` と一致する。`linearmodels` の `robust` は小標本の補正をしない（HC0）ので、標準誤差は R の HC1 よりわずかに小さい。
+
+:::
+
+```{r}
+#| include: false
+iv_est <- unname(coef(iv)["fit_lrprice"])
+iv_se <- unname(se(iv)["fit_lrprice"])
+ols_est <- unname(coef(ols)["lrprice"])
+iv_income_est <- unname(coef(iv_income)["fit_lrprice"])
+first_f <- unname(fitstat(iv, "ivwald")[[1]]$stat)
+record(
+  "iv",
+  method = "操作変数法（IV）",
+  page = "methods/iv.html",
+  data = "AER::CigarettesSW（米国48州、1995年）",
+  question = "たばこの価格が1%上がると、消費は何%変わるか（価格弾力性）",
+  estimand = "価格弾力性（2SLS）",
+  estimate = iv_est,
+  se = iv_se,
+  estimator = "2SLS（fixest）、操作変数は実質の一般売上税",
+  ols = ols_est,
+  iv = iv_est,
+  iv_python = unname(reticulate::py$iv_py$params[["lrprice"]]),
+  iv_income = iv_income_est,
+  iv_income_python = unname(reticulate::py$iv_income_py$params[["lrprice"]]),
+  first_stage_f = first_f,
+  # Stock and Watson (2007) の式 12.11 の値（-1.08）に近い範囲。外れたら CI が公開を止める
+  expect = c(-1.09, -1.07)
+)
+```
+
+```{r}
+#| echo: false
+data.frame(
+  推定 = c("OLS", "2SLS", "2SLS（所得を統制）"),
+  価格弾力性 = c(ols_est, iv_est, iv_income_est),
+  標準誤差 = c(se(ols)["lrprice"], iv_se, se(iv_income)["fit_lrprice"])
+) |>
+  knitr::kable(digits = 3, row.names = FALSE)
+```
+
+2SLS では、価格が1%上がると消費はおよそ `r round(-iv_est, 2)`% 減る。教科書の値（-1.08、標準誤差 0.32）と一致する。所得を統制しても `r round(iv_income_est, 2)` で、大きくは変わらない。第1段階の頑健な F は `r round(first_f, 1)` で、目安の10を大きく超える。ただし、下の「落とし穴」のとおり、通常の t 検定をそのまま使える強さ（約104.7）には届かない。
+
+### 2SLS は2つの傾きの比
+
+操作変数と処置が1つずつで統制変数がないとき、2SLS の推定値は「売上税が消費を動かした傾き（誘導形）」を「売上税が価格を動かした傾き（第1段階）」で割った値になる。
+
+```{r}
+#| fig-cap: "左：第1段階（売上税と実質価格の対数）。右：誘導形（売上税と1人あたりの箱数の対数）。点は州。右の傾きを左の傾きで割ると 2SLS の推定値になる。"
+#| fig-height: 3.4
+first <- coef(lm(lrprice ~ salestax, data = cig))[["salestax"]]
+reduced <- coef(lm(lpacks ~ salestax, data = cig))[["salestax"]]
+long <- rbind(
+  data.frame(salestax = cig$salestax, value = cig$lrprice, panel = "第1段階：価格（対数）"),
+  data.frame(salestax = cig$salestax, value = cig$lpacks, panel = "誘導形：箱数（対数）")
+)
+ggplot(long, aes(salestax, value)) +
+  geom_smooth(method = "lm", formula = y ~ x, se = FALSE,
+              colour = col_main, linewidth = 0.6) +
+  geom_point(size = 2, colour = col_main) +
+  facet_wrap(~panel, scales = "free_y") +
+  labs(x = "実質の一般売上税（1箱あたりドル）", y = NULL)
+```
+
+誘導形の傾き `r round(reduced, 4)` を第1段階の傾き `r round(first, 4)` で割ると `r round(reduced / first, 3)` で、上の 2SLS と同じになる。
+
+## ブラウザで試す：操作変数が弱いと
+
+スライダーで操作変数の強さ（第1段階の係数）を変えると、ブラウザの中の R（webR）が、標本200の作ったデータで推定を300回くり返す。本当の効果は1で、交絡があるので OLS は約1.5に偏る。操作変数が強いと 2SLS は1の周りに集まる。弱くなると、2SLS は OLS の方へ偏り、推定値が大きくばらつく。そのとき第1段階の F も小さくなる。
+
+```{ojs}
+//| echo: false
+viewof strength = Inputs.range([0, 0.6], {value: 0.3, step: 0.02, label: "操作変数の強さ"})
+```
+
+```{webr}
+#| autorun: true
+#| fig-width: 7
+#| fig-height: 4
+#| input:
+#|   - strength
+set.seed(3)
+n <- 200
+sims <- replicate(300, {
+  z <- rnorm(n)                         # 操作変数
+  u <- rnorm(n)                         # 観察できない交絡
+  x <- strength * z + u + rnorm(n)      # 処置
+  y <- 1 * x + u + rnorm(n)             # 結果（本当の効果は1）
+  first <- summary(lm(x ~ z))$coefficients
+  c(iv = cov(z, y) / cov(z, x), ols = cov(x, y) / var(x), f = first["z", "t value"]^2)
+})
+iv <- sims["iv", ]
+ols <- median(sims["ols", ])
+cat(
+  sprintf("第1段階の F（中央値）: %.1f", median(sims["f", ])),
+  sprintf("2SLS の中央値: %.2f  OLS の中央値: %.2f", median(iv), ols),
+  sprintf("2SLS の推定値の中央50%%の幅: %.2f", diff(quantile(iv, c(0.25, 0.75)))),
+  sep = "\n"
+)
+
+h <- hist(iv[iv > -1 & iv < 3], breaks = seq(-1, 3, by = 0.1), plot = FALSE)
+plot(h, col = "#2a78d6", border = "white", main = "", ylim = c(0, max(h$counts) * 1.15),
+     xlab = "2SLS の推定値（-1〜3 の範囲だけを表示）", ylab = "回数")
+abline(v = 1, lwd = 2)
+abline(v = ols, lwd = 2, lty = 2, col = "#eb6834")
+# 凡例の代わりに、線の横に短い名前を置く（webR は日本語の凡例の幅を測り違える）
+text(1, max(h$counts) * 1.1, "本当の効果", pos = 2)
+text(ols, max(h$counts) * 1.1, "OLS", pos = 4, col = "#eb6834")
+```
+
+同じことを Python（ブラウザの中の Pyodide）でも試せる。`strength` を書き換えて「Run Code」を押す。
+
+```{pyodide}
+import numpy as np
+import statsmodels.api as sm
+
+strength = 0.1  # 操作変数の強さ（第1段階の係数）
+rng = np.random.default_rng(3)
+n, reps = 200, 300
+iv, ols, f = [], [], []
+for _ in range(reps):
+    z = rng.normal(size=n)
+    u = rng.normal(size=n)  # 観察できない交絡
+    x = strength * z + u + rng.normal(size=n)
+    y = 1 * x + u + rng.normal(size=n)  # 本当の効果は1
+    iv.append(np.cov(z, y)[0, 1] / np.cov(z, x)[0, 1])
+    ols.append(np.cov(x, y)[0, 1] / np.var(x, ddof=1))
+    f.append(sm.OLS(x, sm.add_constant(z)).fit().tvalues[1] ** 2)
+
+q25, q75 = np.percentile(iv, [25, 75])
+print(f"第1段階の F（中央値）: {np.median(f):.1f}")
+print(f"2SLS の中央値: {np.median(iv):.2f}  OLS の中央値: {np.median(ols):.2f}")
+print(f"2SLS の推定値の中央50%の幅: {q75 - q25:.2f}")
+```
+
+## 落とし穴
+
+- **弱い操作変数は、2SLS を OLS の方へ偏らせ、検定を誤らせる。** 第1段階の F が10未満なら弱いとみなす目安が広く使われてきた（Staiger and Stock 1997; Stock and Yogo 2005）。ただし F が10を超えても、通常の t 検定（±1.96）で有意水準5%は保てない。正しく5%で検定するには F が約104.7を超える必要があり、F に応じて臨界値を広げる tF という手順がある（Lee et al. 2022）。不均一分散があるときは、頑健な F（実効 F）を使う（Montiel Olea and Pflueger 2013）。政治学で発表された IV の推定を再現した研究では、多くで第1段階が弱く、tF などで推論をやり直すと結論が保てないものがあった（Lal et al. 2024）。
+- **除外制約は検定できない。** 操作変数が2つ以上あれば過剰識別の検定（J 検定）ができるが、それは少なくとも1つが妥当だという前提の上での検定であり、除外制約そのものを確かめるものではない。この例でも、売上税が高い州ではたばこへの態度が違う、といった経路がないことは論じるしかない。
+- **効果が単位ごとに違うと、推定値は全体の平均効果ではない。** 単調性の下で、2SLS が推定するのは、操作変数によって処置が変わる単位（遵守者）の平均効果である（局所平均処置効果、LATE。Imbens and Angrist 1994）。操作変数が変われば遵守者も変わり、推定値も変わりうる。
+
+## 参考文献
+
+- Imbens, G. W., & Angrist, J. D. (1994). Identification and estimation of local average treatment effects. *Econometrica*, 62(2), 467–475.
+- Lal, A., Lockhart, M., Xu, Y., & Zu, Z. (2024). How much should we trust instrumental variable estimates in political science? Practical advice based on 67 replicated studies. *Political Analysis*, 32(4), 521–540.
+- Lee, D. S., McCrary, J., Moreira, M. J., & Porter, J. (2022). Valid t-ratio inference for IV. *American Economic Review*, 112(10), 3260–3290.
+- Montiel Olea, J. L., & Pflueger, C. (2013). A robust test for weak instruments. *Journal of Business & Economic Statistics*, 31(3), 358–369.
+- Staiger, D., & Stock, J. H. (1997). Instrumental variables regression with weak instruments. *Econometrica*, 65(3), 557–586.
+- Stock, J. H., & Watson, M. W. (2007). *Introduction to Econometrics* (2nd ed.). Addison Wesley.
+- Stock, J. H., & Yogo, M. (2005). Testing for weak instruments in linear IV regression. In D. W. K. Andrews & J. H. Stock (Eds.), *Identification and Inference for Econometric Models: Essays in Honor of Thomas Rothenberg* (pp. 80–108). Cambridge University Press.
