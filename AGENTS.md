@@ -3,7 +3,8 @@
 ## このリポジトリ
 
 因果推論・計量政治・計量経済の手法を、R と Python の実例で確かめる公開サイト（Quarto のウェブサイト）。
-公開先は GitHub Pages（https://kkazu-tt.github.io/causal-lab/）。リポジトリも公開している。
+公開先は Cloudflare Workers の静的ファイルだけの Worker（https://causal-lab.kkazu.workers.dev 、設定は `wrangler.jsonc`）。
+コードは GitHub（公開）に置く。利用の集計は Cloudflare Web Analytics（Cookie を使わない）。
 
 最初に読むもの: この文書 → `README.md` → 手本のページ `methods/did.qmd`。
 
@@ -20,6 +21,7 @@
 | `scripts/serve.py` | `_site` を手元で配る（標準の http.server は同時の読み込みで接続がリセットされる） |
 | `_extensions/r-wasm/live` | quarto-live（ブラウザの中の R と Python）。CI は毎回最新のリリースで置き換える |
 | `DESCRIPTION` / `pyproject.toml` | CI が入れる R と Python のパッケージの一覧（版は固定しない） |
+| `wrangler.jsonc` / `package.json` | Cloudflare への配備。wrangler だけは版を固定し、Dependabot が上げる |
 
 ## ページの規約
 
@@ -59,7 +61,8 @@ uv run --no-project --with playwright python scripts/check_live.py http://127.0.
 
 ## 公開と並行作業
 
-- 公開は CI（`.github/workflows/build-deploy.yml`）だけが行う。手元から Pages へ配らない
+- 公開は CI（`.github/workflows/build-deploy.yml`）だけが行う。配備のジョブは描画のジョブと分け、Cloudflare の合鍵（secret の `CLOUDFLARE_API_TOKEN`・`CLOUDFLARE_ACCOUNT_ID`）はそこにだけ渡す。本番の確認に落ちたら配備の前の版に戻す
+- 手元からの配備（`npx wrangler deploy`、サンドボックスの外）は、CI が使えないときの非常手段に限る
 - main への直接の push で運用する。push の前に `quarto render` と2つの検査を手元で通す
 - ステージは自分が触ったパスを名指しする。検証が済んだ作業はすぐにコミットする
 - 持ち主の非公開ノートや授業資料を本文に写さない。本文と例は公開の文献とデータで書く

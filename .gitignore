@@ -10,3 +10,5 @@ __pycache__/
 .DS_Store
 # エージェントの作業ツリー
 /.claude/
+node_modules/
+.wrangler/

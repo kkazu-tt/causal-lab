@@ -23,6 +23,8 @@ with sync_playwright() as pw:
     browser = pw.chromium.launch(channel="chrome")
     for path in pages:
         page = browser.new_page()
+        # 検査で開いたページを利用の集計（Cloudflare Web Analytics）に数えさせない
+        page.route("**/static.cloudflareinsights.com/**", lambda route: route.abort())
         errors = []
         page.on("pageerror", lambda e: errors.append(str(e)))
         response = page.goto(f"{base}/{path}", wait_until="load")

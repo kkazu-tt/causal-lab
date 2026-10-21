@@ -1,0 +1,12 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "causal-lab",
+  "compatibility_date": "2026-10-21",
+  // 静的なファイルだけを配る Worker。Quarto が作った _site をそのまま載せ、Worker のコード・バインディング・秘密の値は持たない。
+  // 静的ファイルへの要求は無料で無制限（Cloudflare の文書「Billing and Limitations」、2026-10-21 に確認）。
+  "assets": {
+    "directory": "./_site"
+  },
+  // workers.dev では版ごとの URL が既定で公開され、上げた版がすべて残る。使わないので止める。
+  "preview_urls": false
+}

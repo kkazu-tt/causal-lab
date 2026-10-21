@@ -31,7 +31,7 @@ website:
       - href: environment.qmd
         text: 実行環境
   page-footer:
-    left: "コードは [GitHub](https://github.com/kkazu-tt/causal-lab) で公開。毎週、最新の R・Python で作り直しています。"
+    left: "コードは [GitHub](https://github.com/kkazu-tt/causal-lab) で公開（MIT）。文章と図は [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/deed.ja)。毎週、最新の R・Python で作り直しています。"
 
 format:
   html:

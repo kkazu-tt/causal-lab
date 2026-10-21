@@ -1,0 +1,10 @@
+{
+  "private": true,
+  "description": "Cloudflare への配備に使う wrangler だけを固定する（サイトは Quarto で作る）",
+  "scripts": {
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "wrangler": "4.151.1"
+  }
+}

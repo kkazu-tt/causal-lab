@@ -1,7 +1,7 @@
 name: Build and deploy
 
 # 版を固定せず、その時点で最新の R・R のパッケージ・Python・Python のパッケージ・Quarto・quarto-live で作り直す。
-# 描画・推定値の検査・ブラウザの中の例の検査が全部通ったときだけ GitHub Pages に公開する（AGENTS.md「版の方針」）。
+# 描画・推定値の検査・ブラウザの中の例の検査が全部通ったときだけ Cloudflare Workers に公開する（AGENTS.md「版の方針」）。
 # 落ちたら公開は前の版のままで、report-failure.yml が Issue を立てる。
 on:
   push:
@@ -18,7 +18,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: pages-${{ github.event_name == 'pull_request' && github.ref || 'main' }}
+  group: deploy-${{ github.event_name == 'pull_request' && github.ref || 'main' }}
   cancel-in-progress: false
 
 jobs:
@@ -83,56 +83,107 @@ jobs:
           python3 scripts/serve.py 8765 &
           uv run --no-project --with playwright python scripts/check_live.py http://127.0.0.1:8765
 
-      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: github.event_name != 'pull_request'
         with:
+          name: site
           path: _site
+          retention-days: 7
 
+  # R と Python を動かしたジョブとは分け、Cloudflare の合鍵はこのジョブにだけ渡す。ここでは作ったサイトを配るだけで、
+  # パッケージのコードは動かさない（npm ci は wrangler だけ）。
   deploy:
     if: github.event_name != 'pull_request'
     needs: build
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    permissions:
-      pages: write
-      id-token: write
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    outputs:
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
-        id: deployment
-
-  # 公開できたと記録されても、本番に届いていないことがある。新しい版が届いたかと、本番でもブラウザの中の例が動くか
-  # （公開先は /causal-lab/ の下で、手元の検査とパスが違う）を確かめる。
-  verify:
-    needs: deploy
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 30
+    env:
+      URL: https://causal-lab.kkazu.workers.dev
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: site
+          path: _site
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          package-manager-cache: false
+          node-version: "22"
+
       - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
 
-      - name: 本番に新しい版が届いたか
+      - name: wrangler を入れる
+        run: npm ci
+
+      # 配備か本番の確認が落ちたときに戻す先として、いま本番で動いている版を控える（配備はいつも100%）。
+      - name: 配備の前の版を控える
+        id: before
         env:
-          URL: ${{ needs.deploy.outputs.url }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
-          for wait in 0 15 30 60 120; do
+          set -uo pipefail
+          : "${CLOUDFLARE_API_TOKEN:?repository secret CLOUDFLARE_API_TOKEN is not set}"
+          for wait in 0 30 90; do
             sleep "$wait"
-            if curl -fsS "${URL}environment.html" | grep -q "${GITHUB_SHA::7}"; then
-              echo "${URL} に ${GITHUB_SHA::7} の版が届きました。"
-              exit 0
-            fi
+            # 工程のシェルは -e で動くので、読み取りの失敗でループが終わらないようにする。
+            version="$(npx wrangler deployments status --json | jq -r '.versions[0].version_id')" || version=""
+            [[ "$version" =~ ^[0-9a-f-]{36}$ ]] && break
           done
-          echo "::error::何が起きたか：公開の処理は成功したが、本番の実行環境のページに ${GITHUB_SHA::7} が出ません。対応：数分後に ${URL}environment.html を開いて確かめ、出なければこのワークフローを手動で再実行します。"
+          [[ "$version" =~ ^[0-9a-f-]{36}$ ]] || { echo "::error::本番で動いている版を読めません（${version}）"; exit 1; }
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "配備の前に本番で動いている版: ${version}"
+
+      # Cloudflare の API はしばらく 5xx を返すことがある（owndraft、2026-10-12）。同じものを上げ直しても害はないので3回まで試す。
+      - name: 配備
+        id: deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          for wait in 0 120 300; do
+            sleep "$wait"
+            npx wrangler deploy --message "CI: ${GITHUB_SHA::7}" && exit 0
+          done
           exit 1
 
-      - name: 本番でブラウザの中の例が動くか
+      # 配備できたと記録されても、本番に届いていないことがある。新しい版が届いたかと、本番でもブラウザの中の例が動くかを確かめる。
+      - name: 本番を確かめる
+        id: measure
+        run: |
+          set -uo pipefail
+          for wait in 0 15 30 60; do
+            sleep "$wait"
+            if curl -fsSL "${URL}/environment.html" | grep -q "${GITHUB_SHA::7}"; then
+              echo "${URL} に ${GITHUB_SHA::7} の版が届きました。"
+              uv run --no-project --with playwright python scripts/check_live.py "$URL"
+              exit $?
+            fi
+          done
+          echo "::error::本番の実行環境のページに ${GITHUB_SHA::7} が出ません。"
+          exit 1
+
+      # 配備か本番の確認が落ち、本番の版が控えと違えば（失敗と記録されても新しい版が出ていることがある）、控えた版に戻す。
+      # 実行は失敗のまま終わるので、report-failure.yml が Issue を立てる。
+      - name: 配備の前の版に戻す
+        if: ${{ !cancelled() && steps.before.outputs.version != '' && (steps.deploy.outcome == 'failure' || steps.measure.outcome == 'failure') }}
         env:
-          URL: ${{ needs.deploy.outputs.url }}
-        run: uv run --no-project --with playwright python scripts/check_live.py "$URL"
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          BEFORE: ${{ steps.before.outputs.version }}
+        run: |
+          set -uo pipefail
+          now="$(npx wrangler deployments status --json | jq -r '.versions[0].version_id')" || now=""
+          if [ "$now" = "$BEFORE" ]; then
+            echo "本番は配備の前の版（${BEFORE}）のまま。"
+            exit 0
+          fi
+          for wait in 0 30 90; do
+            sleep "$wait"
+            npx wrangler rollback "$BEFORE" -y -m "CI: 本番の確認に落ちたので戻した（${GITHUB_SHA::7}）" && break
+          done
+          echo "::error::何が起きたか：配備した版（${now}）が本番の確認を通らなかったので、配備の前の版（${BEFORE}）に戻しました。対応：この実行のログで落ちた工程を読み、直してから配備し直します。"

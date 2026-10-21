@@ -1,4 +1,4 @@
-# Actions の版（SHA で固定している）の更新を毎週 PR にさせる。PR でも build-deploy.yml の検査が走る。
+# Actions の版（SHA で固定している）と、配備に使う wrangler の更新を毎週 PR にさせる。PR でも build-deploy.yml の検査が走る。
 # R・Python・パッケージは版を固定せず CI が毎回最新を入れるので、ここでは扱わない。
 # cooldown: 公開から3日たった版だけを出させる。公開直後に見つかる悪意ある版を避けるため。
 version: 2
@@ -15,3 +15,13 @@ updates:
     groups:
       actions:
         patterns: ["*"]
+
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: Asia/Tokyo
+    cooldown:
+      default-days: 3
