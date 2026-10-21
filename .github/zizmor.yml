@@ -1,0 +1,5 @@
+# zizmor の設定。Dependabot の cooldown は公開から3日（72時間の方針。理由は dependabot.yml）で、zizmor の既定の7日より短い。
+rules:
+  dependabot-cooldown:
+    config:
+      days: 3

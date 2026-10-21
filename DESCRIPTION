@@ -4,11 +4,21 @@ Version: 0.0.0
 Description: Not an R package. Lists what CI installs; versions are not pinned (see AGENTS.md).
 License: MIT
 Imports:
+    AER,
+    cobalt,
     did,
+    estimatr,
     fixest,
     ggplot2,
+    htmltools,
     jsonlite,
     knitr,
+    marginaleffects,
+    MatchIt,
+    rddensity,
+    rdrobust,
     reticulate,
     rmarkdown,
-    svglite
+    svglite,
+    Synth,
+    WeightIt

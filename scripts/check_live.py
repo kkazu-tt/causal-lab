@@ -3,8 +3,8 @@
 各ページの「Run Code」を上から順に押し、結果が出るまで待つ。結果が出ない、エラーが出る、ページの JavaScript が
 落ちる、のどれかで失敗する（わざと失敗するページで、R と Python のエラーを両方とも捕まえることを確かめた）。curl の 200 では、ブラウザの中の R や Python が壊れていても気づけないため。
 
-使い方（_site を scripts/serve.py で配ってから）:
-  uv run --with playwright python scripts/check_live.py http://127.0.0.1:8765
+使い方（手元の _site は scripts/serve.py で配ってから。本番なら公開先の URL を渡す）:
+  uv run --no-project --with playwright python scripts/check_live.py http://127.0.0.1:8765
 Chrome は GitHub の ubuntu-24.04 のランナーと手元の Mac に入っているものを使う（channel="chrome"）。
 """
 
@@ -14,8 +14,9 @@ import sys
 from playwright.sync_api import sync_playwright
 
 base = sys.argv[1].rstrip("/")
-site = pathlib.Path(__file__).resolve().parent.parent / "_site"
-pages = ["index.html"] + sorted(f"methods/{p.name}" for p in (site / "methods").glob("*.html"))
+# ページの一覧はリポジトリの methods/*.qmd から作る（本番を確かめるときは手元に _site が無いため）
+root = pathlib.Path(__file__).resolve().parent.parent
+pages = ["index.html", "environment.html"] + sorted(f"methods/{p.stem}.html" for p in (root / "methods").glob("*.qmd"))
 problems = []
 
 with sync_playwright() as pw:
@@ -32,18 +33,26 @@ with sync_playwright() as pw:
         cells = page.locator(".exercise-cell")
         for i in range(cells.count()):
             cell = cells.nth(i)
-            cell.locator(".exercise-editor-btn-run-code").click()
             # 実行中は印（spinner）が出る。消えて、出力欄に何か入るまで待つ。初回はエンジンとパッケージの取得で遅い。
-            try:
-                page.wait_for_function(
-                    """c => c.querySelector('.exercise-editor-eval-indicator').classList.contains('d-none')
-                         && c.querySelector('.cell-output-container').innerText.trim().length
-                            + c.querySelectorAll('.cell-output-container img, .cell-output-container canvas').length > 0""",
-                    arg=cell.element_handle(),
-                    timeout=180_000,
-                )
-            except Exception:
-                problems.append(f"{path} の {i + 1} 番目の例: 3分待っても結果が出ません")
+            # エンジンの取得の瞬断で落ちることがあるので（2026-10-21 に1回）、1回だけやり直す。
+            error = None
+            for attempt in range(2):
+                try:
+                    cell.locator(".exercise-editor-btn-run-code").click()
+                    page.wait_for_function(
+                        """c => c.querySelector('.exercise-editor-eval-indicator').classList.contains('d-none')
+                             && c.querySelector('.cell-output-container').innerText.trim().length
+                                + c.querySelectorAll('.cell-output-container img, .cell-output-container canvas').length > 0""",
+                        arg=cell.element_handle(),
+                        timeout=180_000,
+                    )
+                    error = None
+                    break
+                except Exception as e:
+                    error = f"{type(e).__name__}: {str(e).splitlines()[0][:200]}"
+                    print(f"::notice::{path} の {i + 1} 番目の例の {attempt + 1} 回目が失敗: {error}")
+            if error:
+                problems.append(f"{path} の {i + 1} 番目の例: 結果が出ません（{error}）")
                 continue
             # R のエラーは「R Error」の枠（callout-important）に、Python のエラーはメッセージだけが stderr に出る。
             # 警告も stderr に出るので、Warning を含むものは知らせるだけにする。

@@ -1,0 +1,73 @@
+---
+title: "因果推論ラボ"
+toc: false
+---
+
+```{r}
+#| include: false
+source("R/setup.R")
+# メニューと同じ順に並べる。ここに無いページは後ろに付く
+order <- c("did", "rd", "iv", "matching", "synth", "conjoint")
+files <- list.files("_results", "\\.json$", full.names = TRUE)
+keys <- tools::file_path_sans_ext(basename(files))
+results <- lapply(files[order(match(keys, order, nomatch = length(order) + 1), keys)], jsonlite::fromJSON)
+python_version <- reticulate::import("platform")$python_version()
+
+icon <- function(paths) {
+  sprintf('<svg class="icon" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">%s</svg>', paths)
+}
+# lucide（ISC ライセンス）の circle-help・sigma・database・arrow-right・refresh-cw
+icon_question <- icon('<circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><path d="M12 17h.01"/>')
+icon_estimate <- icon('<path d="M18 7V5a1 1 0 0 0-1-1H6.5a.5.5 0 0 0-.4.8l4.5 6a2 2 0 0 1 0 2.4l-4.5 6a.5.5 0 0 0 .4.8H17a1 1 0 0 0 1-1v-2"/>')
+icon_data <- icon('<ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5V19A9 3 0 0 0 21 19V5"/><path d="M3 12A9 3 0 0 0 21 12"/>')
+icon_go <- icon('<path d="M5 12h14"/><path d="m12 5 7 7-7 7"/>')
+icon_refresh <- icon('<path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/>')
+
+esc <- htmltools::htmlEscape
+num <- function(x) formatC(x, digits = 3, format = "fg", flag = "#", big.mark = ",")
+
+card <- function(r) {
+  interval <- if (is.numeric(r$se)) {
+    sprintf("（95%%区間 %s〜%s）", num(r$estimate - 1.96 * r$se), num(r$estimate + 1.96 * r$se))
+  } else {
+    ""
+  }
+  sprintf(
+    '<a class="method-card" href="%s"><h3>%s</h3><p>%s<span>%s</span></p><p class="estimate">%s<span>%s %s%s<br>%s</span></p><p>%s<span>%s</span></p><span class="go">ページを開く %s</span></a>',
+    esc(r$page), esc(r$method), icon_question, esc(r$question),
+    icon_estimate, esc(r$estimand), num(r$estimate), interval, esc(r$estimator),
+    icon_data, esc(r$data), icon_go
+  )
+}
+```
+
+<p class="lead"><span class="phrase">因果推論・計量政治・計量経済の手法を、</span><span class="phrase">R と Python の実例で確かめる。</span></p>
+
+各ページは、実データでの推定（R と Python）、ブラウザの中でそのまま動かせる例、落とし穴、参考文献からなる。下の数字は、最後にサイトを作り直したときに各ページで計算した値である。
+
+```{r}
+#| output: asis
+#| echo: false
+built <- format(Sys.time(), "%Y-%m-%d", tz = "Asia/Tokyo")
+# Pandoc に HTML を区切らせないよう、生の HTML のブロックとして渡す
+cat("```{=html}\n")
+cat(sprintf(
+  '<div class="stat-row"><div class="stat"><p class="label">手法</p><p class="value">%d</p></div><div class="stat"><p class="label">R</p><p class="value">%s</p></div><div class="stat"><p class="label">Python</p><p class="value">%s</p></div><div class="stat"><p class="label">作り直した日</p><p class="value">%s</p></div></div>',
+  length(results), paste0(R.version$major, ".", R.version$minor), python_version, built
+))
+cat('<div class="method-grid">', vapply(results, card, ""), "</div>", "```", sep = "\n")
+```
+
+区間は「推定値 ± 1.96 × 標準誤差」で、各ページの推定量が出す信頼区間とは少し違うことがある。標準誤差が無い手法（合成統制法など）は区間を出さない。
+
+## 毎週の自動更新
+
+```{r}
+#| output: asis
+#| echo: false
+cat(sprintf('<p>%s <strong>毎週月曜に、その時点で最新の R・Python・パッケージで全ページを作り直している。</strong></p>', icon_refresh))
+```
+
+作り直したあと、推定値がページに書いた想定の範囲に入るか、R と Python の結果が一致するか、ブラウザの中の例がすべて動くかを確かめ、全部通ったときだけ公開する。パッケージの更新で数字や挙動が変わると公開が止まり、気づける。使った版は[実行環境](environment.qmd)にある。
+
+データは R のパッケージに付属する公開データか、ページの中で作ったシミュレーションのデータで、コードは [GitHub](https://github.com/kkazu-tt/causal-lab) で公開している。

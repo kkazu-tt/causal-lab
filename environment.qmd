@@ -1,0 +1,55 @@
+---
+title: "実行環境"
+subtitle: "このサイトを最後に作り直したときの版"
+---
+
+```{r}
+#| include: false
+source("R/setup.R")
+```
+
+このサイトは版を固定せず、毎週と更新のたびに、その時点で最新の R・Python・パッケージで作り直している。下は、いま公開されているページを作ったときの版である。同じ数字を出し直すときは、この版をそろえる。
+
+```{r}
+#| echo: false
+quarto <- system2(file.path(Sys.getenv("QUARTO_BIN_PATH"), "quarto"), "--version", stdout = TRUE)
+live_lua <- readLines("_extensions/r-wasm/live/live.lua")
+engine <- function(pattern) sub(".*/v", "", regmatches(live_lua, regexpr(pattern, live_lua))[1])
+
+data.frame(
+  項目 = c("作り直した日時（日本時間）", "コミット", "R", "Python", "Quarto", "quarto-live", "ブラウザの中の R（webR）", "ブラウザの中の Python（Pyodide）"),
+  版 = c(
+    format(Sys.time(), "%Y-%m-%d %H:%M", tz = "Asia/Tokyo"),
+    substr(Sys.getenv("GITHUB_SHA", "手元で作成"), 1, 7),
+    R.version.string,
+    reticulate::import("platform")$python_version(),
+    quarto,
+    Sys.getenv("QUARTO_LIVE_TAG", "リポジトリに入っている版"),
+    engine("webr\\.r-wasm\\.org/v[0-9.]+"),
+    engine("pyodide/v[0-9.]+")
+  )
+) |>
+  knitr::kable()
+```
+
+## R のパッケージ
+
+```{r}
+#| echo: false
+pkgs <- trimws(strsplit(read.dcf("DESCRIPTION", "Imports")[1, 1], ",")[[1]])
+data.frame(パッケージ = pkgs, 版 = vapply(pkgs, \(p) as.character(packageVersion(p)), "")) |>
+  knitr::kable(row.names = FALSE)
+```
+
+## Python のパッケージ
+
+```{python}
+#| echo: false
+import tomllib
+from importlib.metadata import version
+
+with open("pyproject.toml", "rb") as f:
+    names = tomllib.load(f)["project"]["dependencies"]
+for name in names:
+    print(f"{name:<14} {version(name)}")
+```

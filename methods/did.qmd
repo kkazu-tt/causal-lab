@@ -157,10 +157,12 @@ cat("本当の効果:", effect, " DID の推定値:", round(est, 3), " 偏り:",
 
 m <- aggregate(y ~ year + group, data = d, FUN = mean)
 plot(y ~ year, data = m[m$group, ], type = "b", pch = 19, col = "#2a78d6",
-     ylim = range(m$y), xlab = "年", ylab = "結果の平均")
+     xlim = c(1, 6.9), ylim = extendrange(m$y, f = 0.1), xlab = "年", ylab = "結果の平均")
 lines(y ~ year, data = m[!m$group, ], type = "b", pch = 19, col = "#eb6834")
 abline(v = 3.5, lty = 2)
-legend("topleft", c("処置群", "比較群"), col = c("#2a78d6", "#eb6834"), pch = 19, bty = "n", y.intersp = 1.6)
+# 凡例は日本語の行が重なるので、線の右端に名前を書く
+text(6, m$y[m$group & m$year == 6], "処置群", pos = 4)
+text(6, m$y[!m$group & m$year == 6], "比較群", pos = 4)
 ```
 
 同じことを Python（ブラウザの中の Pyodide）でも試せる。数字を書き換えて「Run Code」を押す。

@@ -23,6 +23,11 @@ website:
       - text: 手法
         menu:
           - methods/did.qmd
+          - methods/rd.qmd
+          - methods/iv.qmd
+          - methods/matching.qmd
+          - methods/synth.qmd
+          - methods/conjoint.qmd
       - href: environment.qmd
         text: 実行環境
   page-footer:

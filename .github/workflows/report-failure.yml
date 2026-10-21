@@ -1,0 +1,156 @@
+name: Report failure
+
+# 見張るワークフローが失敗で終わったら、失敗したジョブと工程の名前、ログの末尾を添えて
+# Issue を立てる。Actions の画面を開けない環境（エージェント）からも、Issue なら読めるため。
+# 元の実行が終わってから、別の実行として動く（workflow_run）。見張る対象をここ1か所で管理でき、
+# 各ワークフローに報告のジョブを足さずに済む。
+# 見張る対象を増やすときは、workflows にワークフローの name を足す。main にあるこのファイルだけが効く。
+# zizmor の dangerous-triggers は見直し済み（2026-09-27）: PR 側のコードを checkout も実行もせず、GitHub の API で実行記録を読んで Issue かコメントを書くだけ
+on:  # zizmor: ignore[dangerous-triggers]
+  workflow_run:
+    workflows:
+      - Build and deploy
+    types: [completed]
+  # 後の実行が成功した失敗の Issue を閉じ、workflow_run の届かない失敗に Issue を立てる見回り（close のジョブ）。12:35 JST。
+  schedule:
+    - cron: "35 3 * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  report:
+    # プルリクエストの失敗は Issue にせず、その PR にコメントする（Dependabot の PR が落ちた理由も読めるように）。
+    if: github.event.workflow_run.conclusion == 'failure' || github.event.workflow_run.conclusion == 'timed_out'
+    permissions:
+      actions: read
+      issues: write
+      pull-requests: write
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: 失敗したジョブのログを添えて Issue を立てる
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          WORKFLOW: ${{ github.event.workflow_run.name }}
+          SHA: ${{ github.event.workflow_run.head_sha }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+          EVENT: ${{ github.event.workflow_run.event }}
+          PR: ${{ github.event.workflow_run.pull_requests[0].number }}
+        # ログは Actions が secret を伏せたもの。本文はファイルに書き、シェルで評価しない。
+        # ログやAPIの取得に失敗しても、Issue だけは必ず立てる（取得の失敗で止めない）。
+        run: |
+          set -uo pipefail
+          body="$(mktemp)"
+          err="$(mktemp)"
+          {
+            echo "ワークフロー「${WORKFLOW}」が失敗しました。"
+            echo
+            echo "- コミット: ${SHA}"
+            echo "- 実行: ${RUN_URL}"
+            echo
+          } > "$body"
+          jobs="$(gh api "repos/${REPO}/actions/runs/${RUN_ID}/jobs" --jq '.jobs[] | select(.conclusion == "failure" or .conclusion == "timed_out") | "\(.id)\t\(.name)"' 2>/dev/null)" || jobs=""
+          if [ -z "$jobs" ]; then
+            echo "失敗したジョブの一覧を取得できませんでした。実行ページで確認してください。" >> "$body"
+          fi
+          while IFS=$'\t' read -r id name; do
+            [ -n "${id:-}" ] || continue
+            steps="$(gh api "repos/${REPO}/actions/jobs/${id}" --jq '[.steps[] | select(.conclusion == "failure") | .name] | join("、")' 2>/dev/null)" || steps="（取得できず）"
+            # ログは色付けのエスケープを含み、gh は既定では出力を拒む。許可したうえで、BOM・エスケープ・行頭の時刻を落とす。
+            # 失敗のあとに後片付けの工程のログが続くので、末尾ではなく、最後の ##[error] の行までの60行を残す。
+            # ##[error] が無いまま落ちたとき（アクションの例外など）は、後片付けが始まる手前までを残す。
+            logs="$(gh api --allow-escape-sequences "repos/${REPO}/actions/jobs/${id}/logs" 2>"$err" \
+              | perl -pe 's/^\xEF\xBB\xBF//; s/\e\[[0-9;]*[A-Za-z]//g; s/^\d{4}-\d\d-\d\dT[\d:.]+Z //' \
+              | awk '{ line[NR] = $0 } /##\[error\]/ { last = NR } /^Post job cleanup\./ && !post { post = NR } END { end = last ? last : (post ? post - 1 : NR); for (i = end > 60 ? end - 59 : 1; i <= end; i++) print line[i] }')" || logs=""
+            # 取れなかったときは、次に直す手がかりとして API のエラーの最後の行を残す。
+            [ -n "$logs" ] || logs="（ログを取得できませんでした: $(tail -n 1 "$err")）"
+            {
+              echo "### ${name}（失敗した工程: ${steps}）"
+              echo
+              echo '```'
+              echo "$logs"
+              echo '```'
+              echo
+            } >> "$body"
+          done <<< "$jobs"
+          if [ "$EVENT" = pull_request ] && [ -n "$PR" ]; then
+            gh pr comment "$PR" -R "$REPO" --body-file "$body"
+          else
+            gh issue create -R "$REPO" --title "失敗: ${WORKFLOW}（${SHA:0:7}）" --body-file "$body"
+          fi
+
+  close:
+    # 1日1回、開いている失敗の Issue を見て、そのワークフローの main での最新の実行が Issue より後に
+    # 成功していれば閉じる。取得先の瞬断のような一時的な失敗が、人が閉じに来るまで残らないように。
+    # 題名が report が立てる形（失敗: <ワークフロー名>（<7桁の sha>））の Issue だけを見る。
+    if: github.event_name != 'workflow_run'
+    permissions:
+      actions: read
+      issues: write
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: 後の実行が成功した失敗の Issue を閉じる
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -uo pipefail
+          gh issue list -R "$REPO" --state open --limit 100 --json number,title,createdAt \
+            --jq '.[] | select(.title | test("^失敗: .+（[0-9a-f]{7}）$")) | [.number, .createdAt, (.title | sub("^失敗: "; "") | sub("（[0-9a-f]{7}）$"; ""))] | @tsv' |
+          while IFS=$'\t' read -r number created workflow; do
+            # ジョブがすべて条件で飛ばされた実行（自動マージの対象外の PR など）は skipped になるので、数えない。
+            IFS=$'\t' read -r conclusion started url < <(gh run list -R "$REPO" --workflow "$workflow" --branch main --status completed --limit 20 \
+              --json conclusion,createdAt,url --jq '[.[] | select(.conclusion != "skipped")][0] | [.conclusion, .createdAt, .url] | @tsv' < /dev/null) || continue
+            if [ "$conclusion" = success ] && [[ "$started" > "$created" ]]; then
+              gh issue close "$number" -R "$REPO" --reason completed --comment "後の実行が成功したので閉じます: $url" < /dev/null
+              echo "閉じた: #$number $workflow"
+            fi
+          done
+
+      # GITHUB_TOKEN で起動した実行（Dependabot の自動マージが起動する配備）は、終わっても workflow_run が起きず、
+      # 上の report が動かない（owndraft で 2026-10-03〜09 の失敗4回が報告されず、本番の配備が止まったままだった）。
+      # 過去26時間に main で手動起動の形で落ちた実行のうち、同じ題名の Issue が（閉じたものも含めて）無く、
+      # その後の実行も成功していないものに Issue を立てる。手動で起動した実行は report が先に立てるので、ここでは重ならない。
+      - name: workflow_run の届かない失敗に Issue を立てる
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -uo pipefail
+          since="$(date -u -d '26 hours ago' +%Y-%m-%dT%H:%M:%SZ)"
+          # 過去26時間の失敗の Issue は、その間に作られたか閉じられたので、その間に更新された分だけ読めば足りる。
+          # 一覧が取れなければ（owndraft で 2026-10-12 に GraphQL の 504 を実測）、重ねて立てないよう、立てずに落ちる。
+          titles="$(gh api "repos/${REPO}/issues?state=all&since=${since}&per_page=100" --jq '.[].title')"
+          gh run list -R "$REPO" --branch main --event workflow_dispatch --limit 50 \
+            --json databaseId,workflowName,headSha,url,conclusion,createdAt \
+            --jq ".[] | select((.conclusion == \"failure\" or .conclusion == \"timed_out\") and .createdAt >= \"$since\") | [.databaseId, .workflowName, .headSha, .url, .createdAt] | @tsv" |
+          while IFS=$'\t' read -r id workflow sha url failed_at; do
+            title="失敗: ${workflow}（${sha:0:7}）"
+            grep -qxF "$title" <<< "$titles" && continue
+            # 後の実行が既に成功していれば片付き済み。立てると、上の close の「Issue より後の成功」にかからず残る。
+            IFS=$'\t' read -r latest started < <(gh run list -R "$REPO" --workflow "$workflow" --branch main --status completed --limit 20 \
+              --json conclusion,createdAt --jq '[.[] | select(.conclusion != "skipped")][0] | [.conclusion, .createdAt] | @tsv' < /dev/null) || latest=""
+            if [ "$latest" = success ] && [[ "$started" > "$failed_at" ]]; then
+              echo "後の実行が成功しているので立てない: $title"
+              continue
+            fi
+            body="$(mktemp)"
+            {
+              echo "ワークフロー「${workflow}」が失敗しました（GITHUB_TOKEN で起動された実行なので、1日1回の見回りで見つけました）。"
+              echo
+              echo "- コミット: ${sha}"
+              echo "- 実行: ${url}"
+              echo "- ログ: \`gh run view ${id} -R ${REPO} --log-failed\`"
+              echo
+              gh api "repos/${REPO}/actions/runs/${id}/jobs" < /dev/null \
+                --jq '.jobs[] | select(.conclusion == "failure" or .conclusion == "timed_out") | "- \(.name)（失敗した工程: \([.steps[] | select(.conclusion == "failure") | .name] | join("、"))）"' \
+                || echo "失敗したジョブの一覧を取得できませんでした。実行ページで確認してください。"
+            } > "$body"
+            gh issue create -R "$REPO" --title "$title" --body-file "$body" < /dev/null
+            titles+=$'\n'"$title"
+            echo "立てた: $title"
+          done

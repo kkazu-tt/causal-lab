@@ -1,0 +1,138 @@
+name: Build and deploy
+
+# 版を固定せず、その時点で最新の R・R のパッケージ・Python・Python のパッケージ・Quarto・quarto-live で作り直す。
+# 描画・推定値の検査・ブラウザの中の例の検査が全部通ったときだけ GitHub Pages に公開する（AGENTS.md「版の方針」）。
+# 落ちたら公開は前の版のままで、report-failure.yml が Issue を立てる。
+on:
+  push:
+    branches: [main]
+    # 文書だけの変更では作り直さない。
+    paths-ignore:
+      - "**.md"
+  pull_request:
+  schedule:
+    - cron: "0 1 * * 1" # 月曜 10:00 JST
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages-${{ github.event_name == 'pull_request' && github.ref || 'main' }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    # Chrome（ブラウザの中の例の検査）が入っている ubuntu-24.04 に固定する。ubuntu-latest は 2026-10-19 から Ubuntu 26。
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: r-lib/actions/setup-r@f9a764fea8d5c63df6ef9a5c7795bf7deb5d7e05 # v2.14.0
+        with:
+          r-version: release
+          use-public-rspm: true
+
+      # DESCRIPTION の Imports を Posit Public Package Manager のバイナリで入れる。Quarto（最新のリリース）もここで入る。
+      - uses: r-lib/actions/setup-r-dependencies@f9a764fea8d5c63df6ef9a5c7795bf7deb5d7e05 # v2.14.0
+        with:
+          upgrade: "TRUE"
+          install-quarto: "true"
+          quarto-version: release
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        id: python
+        with:
+          python-version: "3.x"
+
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+
+      # 出たばかりの Python にはパッケージのバイナリがまだ無いことがある。そのときは1つ前の版で作り、警告を残す。
+      - name: Python のパッケージ
+        env:
+          PY: ${{ steps.python.outputs.python-path }}
+          PY_VERSION: ${{ steps.python.outputs.python-version }}
+        run: |
+          if ! uv sync --python "$PY"; then
+            minor="${PY_VERSION#3.}"
+            previous="3.$(( ${minor%%.*} - 1 ))"
+            echo "::warning::Python ${PY_VERSION} では依存を入れられなかったので、${previous} で作ります。"
+            uv sync --python "$previous"
+          fi
+          .venv/bin/python --version
+
+      - name: quarto-live を最新のリリースに置き換える
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="$(gh api repos/r-wasm/quarto-live/releases/latest --jq .tag_name)"
+          quarto add "r-wasm/quarto-live@${tag}" --no-prompt
+          echo "QUARTO_LIVE_TAG=${tag}" >> "$GITHUB_ENV"
+
+      - name: 描画
+        run: quarto render
+
+      - name: 推定値の検査
+        run: python3 scripts/check_results.py
+
+      - name: ブラウザの中の例の検査
+        run: |
+          python3 scripts/serve.py 8765 &
+          uv run --no-project --with playwright python scripts/check_live.py http://127.0.0.1:8765
+
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        if: github.event_name != 'pull_request'
+        with:
+          path: _site
+
+  deploy:
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    outputs:
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
+        id: deployment
+
+  # 公開できたと記録されても、本番に届いていないことがある。新しい版が届いたかと、本番でもブラウザの中の例が動くか
+  # （公開先は /causal-lab/ の下で、手元の検査とパスが違う）を確かめる。
+  verify:
+    needs: deploy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+
+      - name: 本番に新しい版が届いたか
+        env:
+          URL: ${{ needs.deploy.outputs.url }}
+        run: |
+          for wait in 0 15 30 60 120; do
+            sleep "$wait"
+            if curl -fsS "${URL}environment.html" | grep -q "${GITHUB_SHA::7}"; then
+              echo "${URL} に ${GITHUB_SHA::7} の版が届きました。"
+              exit 0
+            fi
+          done
+          echo "::error::何が起きたか：公開の処理は成功したが、本番の実行環境のページに ${GITHUB_SHA::7} が出ません。対応：数分後に ${URL}environment.html を開いて確かめ、出なければこのワークフローを手動で再実行します。"
+          exit 1
+
+      - name: 本番でブラウザの中の例が動くか
+        env:
+          URL: ${{ needs.deploy.outputs.url }}
+        run: uv run --no-project --with playwright python scripts/check_live.py "$URL"
