@@ -1,0 +1,42 @@
+project:
+  type: website
+  output-dir: _site
+  # コードはプロジェクトの根で動かす（R/setup.R と _results/ を相対パスで読むため）。
+  execute-dir: project
+  # 手法のページが _results/ に書いた推定値を、最後に index.qmd が読む。
+  render:
+    - methods/*.qmd
+    - environment.qmd
+    - index.qmd
+
+lang: ja
+
+website:
+  title: "因果推論ラボ"
+  description: "因果推論・計量政治・計量経済の手法を、R と Python の実例で確かめるダッシュボード"
+  repo-url: https://github.com/kkazu-tt/causal-lab
+  repo-actions: [source, issue]
+  navbar:
+    left:
+      - href: index.qmd
+        text: ダッシュボード
+      - text: 手法
+        menu:
+          - methods/did.qmd
+      - href: environment.qmd
+        text: 実行環境
+  page-footer:
+    left: "コードは [GitHub](https://github.com/kkazu-tt/causal-lab) で公開。毎週、最新の R・Python で作り直しています。"
+
+format:
+  html:
+    theme: cosmo
+    css: styles.css
+    toc: true
+    toc-title: このページ
+    code-copy: true
+    code-tools: false
+
+execute:
+  warning: false
+  message: false

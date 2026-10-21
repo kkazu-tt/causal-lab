@@ -1,0 +1,17 @@
+[project]
+name = "causal-lab"
+version = "0"
+requires-python = ">=3.12"
+# 版は固定しない。CI が毎回最新を入れて作り直し、使った版は「実行環境」のページに残す（AGENTS.md）。
+dependencies = [
+  "linearmodels",
+  "matplotlib",
+  "numpy",
+  "pandas",
+  "rdrobust",
+  "scipy",
+  "statsmodels",
+]
+
+[tool.uv]
+package = false

@@ -1,0 +1,12 @@
+/* 階層は黒の太字で作る（灰色や細字で弱めない）。 */
+body {
+  color: #0b0b0b;
+}
+
+h1, h2, h3, .navbar-brand {
+  font-weight: 700;
+}
+
+.lead, .subtitle {
+  color: #0b0b0b;
+}

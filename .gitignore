@@ -1,0 +1,10 @@
+/.quarto/
+/_site/
+/_results/
+/.venv/
+# 依存は毎回最新で解決する（AGENTS.md「版の方針」）。
+uv.lock
+*_files/
+**/*.quarto_ipynb
+__pycache__/
+.DS_Store

@@ -1,0 +1,14 @@
+Package: causallab
+Title: Packages the causal-lab site needs (read by r-lib/actions/setup-r-dependencies)
+Version: 0.0.0
+Description: Not an R package. Lists what CI installs; versions are not pinned (see AGENTS.md).
+License: MIT
+Imports:
+    did,
+    fixest,
+    ggplot2,
+    jsonlite,
+    knitr,
+    reticulate,
+    rmarkdown,
+    svglite

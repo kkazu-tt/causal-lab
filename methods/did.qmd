@@ -1,0 +1,199 @@
+---
+title: "差の差法（DID）"
+subtitle: "処置の前後の変化を、処置を受けなかった群の変化と比べて効果を推定する"
+format: live-html
+engine: knitr
+---
+
+{{< include ../_extensions/r-wasm/live/_knitr.qmd >}}
+
+```{r}
+#| include: false
+source("R/setup.R")
+library(fixest)
+library(did)
+```
+
+## 何を推定するか
+
+処置を受けた群の平均処置効果（ATT）を推定する。2群・2期なら、処置群の前後の差から比較群の前後の差を引いた値になる。比較群の変化を、「処置がなかったら処置群に起きていた変化」の代わりに使う。
+
+## 識別の仮定
+
+- **並行トレンド**：処置がなければ、処置群の結果は比較群と同じだけ変化していた。処置の前の期間で傾きがそろっているかは確かめられるが、処置の後については確かめようがない。
+- **予期効果がない**：処置が始まる前に、それを見越して結果が動いていない。
+- **群の顔ぶれが変わらない**：処置によって、どの単位が観察に入るかが変わらない。
+
+処置の時期が単位ごとにずれる場合（staggered adoption）、二元固定効果（TWFE）の回帰は、すでに処置された単位を比較群に含めてしまう。効果が時間とともに変わると、推定値は ATT から離れ、符号が逆になることもある（Goodman-Bacon 2021; de Chaisemartin and D'Haultfœuille 2020）。Callaway and Sant'Anna (2021) は、処置が始まった年ごとの群と暦年の組ごとに効果を推定してから集計し、この問題を避ける。
+
+## 実データの例：最低賃金と10代の雇用
+
+`did` パッケージの `mpdta` は、米国の500郡の10代の雇用（対数）を2003〜2007年について追ったデータで、Callaway and Sant'Anna (2021) の分析の一部である。最低賃金が上がった年（`first.treat`）は郡によって2004・2006・2007年と異なり、期間中に上がらなかった郡（`first.treat` が0）が比較群になる。
+
+```{r}
+data(mpdta, package = "did")
+mpdta$treated <- as.integer(mpdta$first.treat > 0 & mpdta$year >= mpdta$first.treat)
+table(first.treat = mpdta$first.treat, year = mpdta$year)
+```
+
+### TWFE と Callaway–Sant'Anna の推定
+
+::: {.panel-tabset}
+
+## R
+
+```{r}
+# 二元固定効果（郡と年）。標準誤差は郡でクラスターする
+twfe <- feols(lemp ~ treated | countyreal + year, data = mpdta, cluster = ~countyreal)
+
+# 処置が始まった年の群 × 暦年ごとに効果を推定してから集計する
+set.seed(1) # 信頼区間を乗数ブートストラップで作るため
+cs <- att_gt(
+  yname = "lemp", tname = "year", idname = "countyreal",
+  gname = "first.treat", data = mpdta
+)
+cs_simple <- aggte(cs, type = "simple")
+cs_dynamic <- aggte(cs, type = "dynamic")
+
+coeftable(twfe)
+cs_simple
+```
+
+## Python
+
+```{python}
+from linearmodels.panel import PanelOLS
+
+# R で読んだデータを reticulate でそのまま受け取る
+df = r.mpdta.set_index(["countyreal", "year"])
+twfe_py = PanelOLS.from_formula(
+    "lemp ~ treated + EntityEffects + TimeEffects", data=df
+).fit(cov_type="clustered", cluster_entity=True)
+print(twfe_py.summary.tables[1])
+```
+
+Python には Callaway–Sant'Anna の成熟した実装がまだ少ないので、ここでは TWFE だけを示す。係数は R の `fixest` と一致する。
+
+:::
+
+```{r}
+#| include: false
+twfe_est <- unname(coef(twfe)["treated"])
+twfe_se <- unname(se(twfe)["treated"])
+record(
+  "did",
+  method = "差の差法（DID）",
+  page = "methods/did.html",
+  data = "did::mpdta（米国500郡、2003〜2007年）",
+  question = "最低賃金の引き上げは10代の雇用（対数）を変えたか",
+  estimand = "ATT",
+  estimate = cs_simple$overall.att,
+  se = cs_simple$overall.se,
+  estimator = "Callaway–Sant'Anna（did）",
+  twfe = twfe_est,
+  twfe_se = twfe_se,
+  twfe_python = unname(reticulate::py$twfe_py$params[["treated"]]),
+  # 公表値（Callaway and Sant'Anna 2021 の例）に近い範囲。外れたら CI が公開を止める
+  expect = c(-0.045, -0.035)
+)
+```
+
+```{r}
+#| echo: false
+data.frame(
+  推定量 = c("TWFE（fixest）", "Callaway–Sant'Anna（did）"),
+  推定値 = c(twfe_est, cs_simple$overall.att),
+  標準誤差 = c(twfe_se, cs_simple$overall.se)
+) |>
+  knitr::kable(digits = 4)
+```
+
+どちらも負で、最低賃金の引き上げのあと10代の雇用はおよそ `r round(-100 * cs_simple$overall.att, 1)`% 減ったと読める（対数の差なので近似）。このデータでは、2つの推定量の差は大きくない。
+
+### イベントスタディ：処置からの年数ごとの効果
+
+```{r}
+#| fig-cap: "処置からの年数ごとの ATT と95%同時信頼区間（Callaway–Sant'Anna）。0 より左は処置の前で、0 に近ければ並行トレンドと矛盾しない。"
+es <- data.frame(
+  e = cs_dynamic$egt,
+  att = cs_dynamic$att.egt,
+  lo = cs_dynamic$att.egt - cs_dynamic$crit.val.egt * cs_dynamic$se.egt,
+  hi = cs_dynamic$att.egt + cs_dynamic$crit.val.egt * cs_dynamic$se.egt
+)
+ggplot(es, aes(e, att)) +
+  geom_hline(yintercept = 0, linewidth = 0.3) +
+  geom_vline(xintercept = -0.5, linetype = "dashed", linewidth = 0.3) +
+  geom_errorbar(aes(ymin = lo, ymax = hi), width = 0, linewidth = 0.6, colour = col_main) +
+  geom_point(size = 2.5, colour = col_main) +
+  labs(x = "処置からの年数", y = "10代の雇用（対数）への効果")
+```
+
+## ブラウザで試す：並行トレンドが崩れると
+
+スライダーを動かすと、ブラウザの中の R（webR）がデータを作り直して推定する。処置群だけが毎年少しずつ伸びている（並行トレンドが崩れている）と、DID はその伸びを効果と取り違える。この設定では、偏りはおよそ「年あたりの伸び × 3」になる（残りは乱数のぶれ）。処置後の平均の年（5年目）と処置前の平均の年（2年目）の差が3年だからである。
+
+```{ojs}
+//| echo: false
+viewof effect = Inputs.range([-0.5, 0.5], {value: 0.2, step: 0.05, label: "本当の効果"})
+viewof gap = Inputs.range([-0.1, 0.1], {value: 0, step: 0.01, label: "処置群だけの年あたりの伸び"})
+```
+
+```{webr}
+#| autorun: true
+#| fig-width: 7
+#| fig-height: 4
+#| input:
+#|   - effect
+#|   - gap
+set.seed(2)
+d <- expand.grid(id = 1:200, year = 1:6)
+d$group <- d$id <= 100 # 前半の100単位が処置群
+d$post <- d$year >= 4  # 4年目から処置
+d$y <- 1 + 0.1 * d$year + gap * d$year * d$group +
+  effect * (d$group & d$post) + rnorm(nrow(d), sd = 0.2)
+
+est <- coef(lm(y ~ group * post, data = d))[["groupTRUE:postTRUE"]]
+cat("本当の効果:", effect, " DID の推定値:", round(est, 3), " 偏り:", round(est - effect, 3), "\n")
+
+m <- aggregate(y ~ year + group, data = d, FUN = mean)
+plot(y ~ year, data = m[m$group, ], type = "b", pch = 19, col = "#2a78d6",
+     ylim = range(m$y), xlab = "年", ylab = "結果の平均")
+lines(y ~ year, data = m[!m$group, ], type = "b", pch = 19, col = "#eb6834")
+abline(v = 3.5, lty = 2)
+legend("topleft", c("処置群", "比較群"), col = c("#2a78d6", "#eb6834"), pch = 19, bty = "n", y.intersp = 1.6)
+```
+
+同じことを Python（ブラウザの中の Pyodide）でも試せる。数字を書き換えて「Run Code」を押す。
+
+```{pyodide}
+import numpy as np
+import pandas as pd
+import statsmodels.formula.api as smf
+
+effect, gap = 0.2, 0.03  # 本当の効果と、処置群だけの年あたりの伸び
+rng = np.random.default_rng(2)
+d = pd.DataFrame([(i, t) for i in range(200) for t in range(1, 7)], columns=["id", "year"])
+d["group"] = (d["id"] < 100).astype(int)
+d["post"] = (d["year"] >= 4).astype(int)
+d["y"] = (1 + 0.1 * d["year"] + gap * d["year"] * d["group"]
+          + effect * d["group"] * d["post"] + rng.normal(0, 0.2, len(d)))
+
+est = smf.ols("y ~ group * post", data=d).fit().params["group:post"]
+print(f"本当の効果: {effect}  DID の推定値: {est:.3f}  偏り: {est - effect:.3f}")
+```
+
+## 落とし穴
+
+- **処置前の係数が0に近くても、並行トレンドの証明にはならない。** 検出力が低いと崩れを見逃し、事前の検定を通ったものだけを報告すると推定値が偏る（Roth 2022）。崩れの大きさを仮定して結論が保てるかを見る感度分析がある（Rambachan and Roth 2023、R の `HonestDiD`）。
+- **標準誤差は、処置が割り当てられた単位でクラスターする。** 年ごとの相関を無視すると、標準誤差が小さく出すぎる（Bertrand, Duflo, and Mullainathan 2004）。
+- **並行トレンドは結果の測り方に依存する。** 対数で成り立てば水準では成り立たないのが普通で、どちらの尺度で仮定するかを先に決める（Roth and Sant'Anna 2023）。
+
+## 参考文献
+
+- Bertrand, M., Duflo, E., & Mullainathan, S. (2004). How much should we trust differences-in-differences estimates? *Quarterly Journal of Economics*, 119(1), 249–275.
+- Callaway, B., & Sant'Anna, P. H. C. (2021). Difference-in-differences with multiple time periods. *Journal of Econometrics*, 225(2), 200–230.
+- de Chaisemartin, C., & D'Haultfœuille, X. (2020). Two-way fixed effects estimators with heterogeneous treatment effects. *American Economic Review*, 110(9), 2964–2996.
+- Goodman-Bacon, A. (2021). Difference-in-differences with variation in treatment timing. *Journal of Econometrics*, 225(2), 254–277.
+- Rambachan, A., & Roth, J. (2023). A more credible approach to parallel trends. *Review of Economic Studies*, 90(5), 2555–2591.
+- Roth, J. (2022). Pretest with caution: Event-study estimates after testing for parallel trends. *American Economic Review: Insights*, 4(3), 305–322.
+- Roth, J., & Sant'Anna, P. H. C. (2023). When is parallel trends sensitive to functional form? *Econometrica*, 91(2), 737–747.
