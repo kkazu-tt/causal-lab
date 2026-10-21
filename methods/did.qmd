@@ -28,11 +28,12 @@ library(did)
 
 ## 実データの例：最低賃金と10代の雇用
 
-`did` パッケージの `mpdta` は、米国の500郡の10代の雇用（対数）を2003〜2007年について追ったデータで、Callaway and Sant'Anna (2021) の分析の一部である。最低賃金が上がった年（`first.treat`）は郡によって2004・2006・2007年と異なり、期間中に上がらなかった郡（`first.treat` が0）が比較群になる。
+`did` パッケージの `mpdta` は、米国の500郡の10代の雇用（対数）を2003〜2007年について追ったデータで、Callaway and Sant'Anna (2021) の分析の一部である。最低賃金が上がった年（`first.treat`）は郡によって2004・2006・2007年と異なり、期間中に上がらなかった郡（`first.treat` が0）が比較群になる。最低賃金は州ごとに決まるので、同じ州の郡は同じ年に処置される（29州）。
 
 ```{r}
 data(mpdta, package = "did")
 mpdta$treated <- as.integer(mpdta$first.treat > 0 & mpdta$year >= mpdta$first.treat)
+mpdta$state <- mpdta$countyreal %/% 1000 # 郡の番号は FIPS コードで、千の位から上が州
 table(first.treat = mpdta$first.treat, year = mpdta$year)
 ```
 
@@ -43,14 +44,15 @@ table(first.treat = mpdta$first.treat, year = mpdta$year)
 ## R
 
 ```{r}
-# 二元固定効果（郡と年）。標準誤差は郡でクラスターする
-twfe <- feols(lemp ~ treated | countyreal + year, data = mpdta, cluster = ~countyreal)
+# 二元固定効果（郡と年）。処置は州ごとに決まるので、標準誤差は州でクラスターする
+twfe <- feols(lemp ~ treated | countyreal + year, data = mpdta, cluster = ~state)
 
 # 処置が始まった年の群 × 暦年ごとに効果を推定してから集計する
 set.seed(1) # 信頼区間を乗数ブートストラップで作るため
 cs <- att_gt(
   yname = "lemp", tname = "year", idname = "countyreal",
-  gname = "first.treat", data = mpdta
+  gname = "first.treat", data = mpdta,
+  clustervars = c("countyreal", "state") # 州でクラスターしたブートストラップ
 )
 cs_simple <- aggte(cs, type = "simple")
 cs_dynamic <- aggte(cs, type = "dynamic")
@@ -68,7 +70,7 @@ from linearmodels.panel import PanelOLS
 df = r.mpdta.set_index(["countyreal", "year"])
 twfe_py = PanelOLS.from_formula(
     "lemp ~ treated + EntityEffects + TimeEffects", data=df
-).fit(cov_type="clustered", cluster_entity=True)
+).fit(cov_type="clustered", clusters=df["state"])
 print(twfe_py.summary.tables[1])
 ```
 
@@ -80,6 +82,13 @@ Python には Callaway–Sant'Anna の成熟した実装がまだ少ないので
 #| include: false
 twfe_est <- unname(coef(twfe)["treated"])
 twfe_se <- unname(se(twfe)["treated"])
+# 比べるために、郡でクラスターした標準誤差も出す
+twfe_se_county <- unname(se(summary(twfe, cluster = ~countyreal))["treated"])
+set.seed(1)
+cs_se_county <- aggte(att_gt(
+  yname = "lemp", tname = "year", idname = "countyreal",
+  gname = "first.treat", data = mpdta
+), type = "simple")$overall.se
 record(
   "did",
   method = "差の差法（DID）",
@@ -92,6 +101,7 @@ record(
   estimator = "Callaway–Sant'Anna（did）",
   twfe = twfe_est,
   twfe_se = twfe_se,
+  twfe_se_county = twfe_se_county,
   twfe_python = unname(reticulate::py$twfe_py$params[["treated"]]),
   # 公表値（Callaway and Sant'Anna 2021 の例）に近い範囲。外れたら CI が公開を止める
   expect = c(-0.045, -0.035)
@@ -103,12 +113,21 @@ record(
 data.frame(
   推定量 = c("TWFE（fixest）", "Callaway–Sant'Anna（did）"),
   推定値 = c(twfe_est, cs_simple$overall.att),
-  標準誤差 = c(twfe_se, cs_simple$overall.se)
+  `標準誤差（州でクラスター）` = c(twfe_se, cs_simple$overall.se),
+  `標準誤差（郡でクラスター）` = c(twfe_se_county, cs_se_county),
+  check.names = FALSE
 ) |>
   knitr::kable(digits = 4)
 ```
 
-どちらも負で、最低賃金の引き上げのあと10代の雇用はおよそ `r round(-100 * cs_simple$overall.att, 1)`% 減ったと読める（対数の差なので近似）。このデータでは、2つの推定量の差は大きくない。
+```{r}
+#| include: false
+covers_zero <- function(est, se) if (abs(est / se) < qnorm(0.975)) "0 を含む" else "0 を含まない"
+```
+
+どちらも負で、最低賃金の引き上げのあと10代の雇用はおよそ `r round(-100 * cs_simple$overall.att, 1)`% 減ったと読める（対数の差なので近似）。このデータでは、2つの推定量の点推定の差は大きくない。
+
+標準誤差は、処置が割り当てられた州でクラスターした値を使う。郡でクラスターすると、同じ州の郡に共通するショックを無視するので、標準誤差は TWFE で `r round(twfe_se / twfe_se_county, 1)` 分の1、Callaway–Sant'Anna で `r round(cs_simple$overall.se / cs_se_county, 1)` 分の1に小さく出る。州でクラスターした95%区間は、TWFE では`r covers_zero(twfe_est, twfe_se)`が、Callaway–Sant'Anna では`r covers_zero(cs_simple$overall.att, cs_simple$overall.se)`。クラスターが29しかないので、少ないクラスターでも使えるワイルド・クラスター・ブートストラップで確かめる方法もある（Cameron, Gelbach, and Miller 2008）。
 
 ### イベントスタディ：処置からの年数ごとの効果
 
@@ -187,13 +206,15 @@ print(f"本当の効果: {effect}  DID の推定値: {est:.3f}  偏り: {est - e
 ## 落とし穴
 
 - **処置前の係数が0に近くても、並行トレンドの証明にはならない。** 検出力が低いと崩れを見逃し、事前の検定を通ったものだけを報告すると推定値が偏る（Roth 2022）。崩れの大きさを仮定して結論が保てるかを見る感度分析がある（Rambachan and Roth 2023、R の `HonestDiD`）。
-- **標準誤差は、処置が割り当てられた単位でクラスターする。** 年ごとの相関を無視すると、標準誤差が小さく出すぎる（Bertrand, Duflo, and Mullainathan 2004）。
+- **標準誤差は、処置が割り当てられた単位でクラスターする。** 年ごとの相関を無視すると、標準誤差が小さく出すぎる（Bertrand, Duflo, and Mullainathan 2004）。どの単位でクラスターするかは、処置の割り当てと標本の抜き出し方で決まる（Abadie, Athey, Imbens, and Wooldridge 2023）。この例では州で、郡でクラスターすると上のとおり小さく出る。
 - **並行トレンドは結果の測り方に依存する。** 対数で成り立てば水準では成り立たないのが普通で、どちらの尺度で仮定するかを先に決める（Roth and Sant'Anna 2023）。
 
 ## 参考文献
 
+- Abadie, A., Athey, S., Imbens, G. W., & Wooldridge, J. M. (2023). When should you adjust standard errors for clustering? *Quarterly Journal of Economics*, 138(1), 1–35.
 - Bertrand, M., Duflo, E., & Mullainathan, S. (2004). How much should we trust differences-in-differences estimates? *Quarterly Journal of Economics*, 119(1), 249–275.
 - Callaway, B., & Sant'Anna, P. H. C. (2021). Difference-in-differences with multiple time periods. *Journal of Econometrics*, 225(2), 200–230.
+- Cameron, A. C., Gelbach, J. B., & Miller, D. L. (2008). Bootstrap-based improvements for inference with clustered errors. *Review of Economics and Statistics*, 90(3), 414–427.
 - de Chaisemartin, C., & D'Haultfœuille, X. (2020). Two-way fixed effects estimators with heterogeneous treatment effects. *American Economic Review*, 110(9), 2964–2996.
 - Goodman-Bacon, A. (2021). Difference-in-differences with variation in treatment timing. *Journal of Econometrics*, 225(2), 254–277.
 - Rambachan, A., & Roth, J. (2023). A more credible approach to parallel trends. *Review of Economic Studies*, 90(5), 2555–2591.

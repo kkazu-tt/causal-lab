@@ -27,7 +27,10 @@ esc <- htmltools::htmlEscape
 num <- function(x) formatC(x, digits = 3, format = "fg", flag = "#", big.mark = ",")
 
 card <- function(r) {
-  interval <- if (is.numeric(r$se)) {
+  # ページが自分の区間（RD の頑健な区間、IV の Anderson–Rubin など）を出していればそれを使う
+  interval <- if (length(r$ci) == 2) {
+    sprintf("（%s %s〜%s）", esc(r$ci_label), num(r$ci[1]), num(r$ci[2]))
+  } else if (is.numeric(r$se)) {
     sprintf("（95%%区間 %s〜%s）", num(r$estimate - 1.96 * r$se), num(r$estimate + 1.96 * r$se))
   } else {
     ""
@@ -58,7 +61,7 @@ cat(sprintf(
 cat('<div class="method-grid">', vapply(results, card, ""), "</div>", "```", sep = "\n")
 ```
 
-区間は「推定値 ± 1.96 × 標準誤差」で、各ページの推定量が出す信頼区間とは少し違うことがある。標準誤差が無い手法（合成統制法など）は区間を出さない。
+区間は、ページが自分の区間を出している手法（回帰不連続の頑健な区間、操作変数の Anderson–Rubin の区間）はそれを、ほかは「推定値 ± 1.96 × 標準誤差」を出している。標準誤差が無い手法（合成統制法）は区間を出さない。
 
 ## 毎週の自動更新
 

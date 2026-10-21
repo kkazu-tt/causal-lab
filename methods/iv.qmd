@@ -85,6 +85,24 @@ iv_se <- unname(se(iv)["fit_lrprice"])
 ols_est <- unname(coef(ols)["lrprice"])
 iv_income_est <- unname(coef(iv_income)["fit_lrprice"])
 first_f <- unname(fitstat(iv, "ivwald")[[1]]$stat)
+
+# Anderson–Rubin の区間: β = b0 なら lpacks - b0 * lrprice は売上税と無相関になる。
+# その回帰の売上税の係数を頑健な t（HC1）で検定し、棄却されない b0 を集める
+zc <- cig$salestax - mean(cig$salestax)
+ar_t <- function(b0) {
+  u <- cig$lpacks - b0 * cig$lrprice
+  g <- sum(zc * u) / sum(zc^2)
+  e <- u - mean(u) - g * zc
+  g / (sqrt(length(u) / (length(u) - 2) * sum(zc^2 * e^2)) / sum(zc^2))
+}
+# 式が fixest の頑健な t と同じかを確かめる（b0 = 0 は誘導形の回帰）
+stopifnot(all.equal(ar_t(0), unname(tstat(feols(lpacks ~ salestax, data = cig, vcov = "hetero"))["salestax"])))
+grid <- seq(-6, 4, by = 0.001)
+accepted <- grid[abs(vapply(grid, ar_t, 0)) < qnorm(0.975)]
+# 区間が格子の端に届いていたら、有界でない（操作変数が弱すぎる）ので止める
+stopifnot(min(accepted) > min(grid), max(accepted) < max(grid))
+ar_ci <- range(accepted)
+
 record(
   "iv",
   method = "操作変数法（IV）",
@@ -101,6 +119,8 @@ record(
   iv_income = iv_income_est,
   iv_income_python = unname(reticulate::py$iv_income_py$params[["lrprice"]]),
   first_stage_f = first_f,
+  ci = ar_ci,
+  ci_label = "Anderson–Rubin の95%区間",
   # Stock and Watson (2007) の式 12.11 の値（-1.08）に近い範囲。外れたら CI が公開を止める
   expect = c(-1.09, -1.07)
 )
@@ -117,6 +137,8 @@ data.frame(
 ```
 
 2SLS では、価格が1%上がると消費はおよそ `r round(-iv_est, 2)`% 減る。教科書の値（-1.08、標準誤差 0.32）と一致する。所得を統制しても `r round(iv_income_est, 2)` で、大きくは変わらない。第1段階の頑健な F は `r round(first_f, 1)` で、目安の10を大きく超える。ただし、下の「落とし穴」のとおり、通常の t 検定をそのまま使える強さ（約104.7）には届かない。
+
+そこで、操作変数の強さに頼らない Anderson–Rubin の区間も求める（Anderson and Rubin 1949）。「弾力性が b0 なら、消費から b0 × 価格を引いたものは売上税と無関係になる」という検定を、b0 を動かしながら繰り返し、棄却されない b0 を集めた範囲である。95%の区間は [`r round(ar_ci[1], 2)`, `r round(ar_ci[2], 2)`] で、通常の t による区間 [`r round(iv_est - qnorm(0.975) * iv_se, 2)`, `r round(iv_est + qnorm(0.975) * iv_se, 2)`] と並べて読む。ダッシュボードには Anderson–Rubin の区間を出している。
 
 ### 2SLS は2つの傾きの比
 
@@ -214,14 +236,17 @@ print(f"2SLS の推定値の中央50%の幅: {q75 - q25:.2f}")
 
 - **弱い操作変数は、2SLS を OLS の方へ偏らせ、検定を誤らせる。** 第1段階の F が10未満なら弱いとみなす目安が広く使われてきた（Staiger and Stock 1997; Stock and Yogo 2005）。ただし F が10を超えても、通常の t 検定（±1.96）で有意水準5%は保てない。正しく5%で検定するには F が約104.7を超える必要があり、F に応じて臨界値を広げる tF という手順がある（Lee et al. 2022）。不均一分散があるときは、頑健な F（実効 F）を使う（Montiel Olea and Pflueger 2013）。政治学で発表された IV の推定を再現した研究では、多くで第1段階が弱く、tF などで推論をやり直すと結論が保てないものがあった（Lal et al. 2024）。
 - **除外制約は検定できない。** 操作変数が2つ以上あれば過剰識別の検定（J 検定）ができるが、それは少なくとも1つが妥当だという前提の上での検定であり、除外制約そのものを確かめるものではない。この例でも、売上税が高い州ではたばこへの態度が違う、といった経路がないことは論じるしかない。
-- **効果が単位ごとに違うと、推定値は全体の平均効果ではない。** 単調性の下で、2SLS が推定するのは、操作変数によって処置が変わる単位（遵守者）の平均効果である（局所平均処置効果、LATE。Imbens and Angrist 1994）。操作変数が変われば遵守者も変わり、推定値も変わりうる。
+- **効果が単位ごとに違うと、推定値は全体の平均効果ではない。** 処置が二値なら、単調性の下で 2SLS が推定するのは、操作変数によって処置が変わる単位（遵守者）の平均効果である（局所平均処置効果、LATE。Imbens and Angrist 1994）。この例の価格のように処置が連続量なら、2SLS は、操作変数が処置を動かした範囲での限界的な効果を、操作変数が処置をどれだけ動かしたかで重み付けた平均になる（Angrist and Imbens 1995）。需要と供給の連立方程式の文脈では、Angrist, Graddy, and Imbens (2000) が魚の需要の例でこの解釈を示した。どちらの場合も、操作変数が変われば推定値も変わりうる。
 
 ## 参考文献
 
+- Anderson, T. W., & Rubin, H. (1949). Estimation of the parameters of a single equation in a complete system of stochastic equations. *Annals of Mathematical Statistics*, 20(1), 46–63.
+- Angrist, J. D., Graddy, K., & Imbens, G. W. (2000). The interpretation of instrumental variables estimators in simultaneous equations models with an application to the demand for fish. *Review of Economic Studies*, 67(3), 499–527.
+- Angrist, J. D., & Imbens, G. W. (1995). Two-stage least squares estimation of average causal effects in models with variable treatment intensity. *Journal of the American Statistical Association*, 90(430), 431–442.
 - Imbens, G. W., & Angrist, J. D. (1994). Identification and estimation of local average treatment effects. *Econometrica*, 62(2), 467–475.
 - Lal, A., Lockhart, M., Xu, Y., & Zu, Z. (2024). How much should we trust instrumental variable estimates in political science? Practical advice based on 67 replicated studies. *Political Analysis*, 32(4), 521–540.
 - Lee, D. S., McCrary, J., Moreira, M. J., & Porter, J. (2022). Valid t-ratio inference for IV. *American Economic Review*, 112(10), 3260–3290.
 - Montiel Olea, J. L., & Pflueger, C. (2013). A robust test for weak instruments. *Journal of Business & Economic Statistics*, 31(3), 358–369.
 - Staiger, D., & Stock, J. H. (1997). Instrumental variables regression with weak instruments. *Econometrica*, 65(3), 557–586.
-- Stock, J. H., & Watson, M. W. (2007). *Introduction to Econometrics* (2nd ed.). Addison Wesley.
+- Stock, J. H., & Watson, M. W. (2007). *Introduction to Econometrics* (2nd ed.). Pearson Addison Wesley.
 - Stock, J. H., & Yogo, M. (2005). Testing for weak instruments in linear IV regression. In D. W. K. Andrews & J. H. Stock (Eds.), *Identification and Inference for Econometric Models: Essays in Honor of Thomas Rothenberg* (pp. 80–108). Cambridge University Press.

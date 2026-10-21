@@ -27,7 +27,7 @@
 - 節の順: 何を推定するか → 識別の仮定 → 実データの例（R と Python のタブ）→ ブラウザで試す → 落とし穴 → 参考文献
 - 実データは R のパッケージに付いたものを R で読み、Python へは reticulate で渡す（`r.<名前>`）。CSV を作って配らない（データの再配布を避けるため）
 - R と Python で同じ推定をしたら、`record()` に `<名前>` と `<名前>_python` を両方書く。CI が一致を確かめる
-- `record("<key>", method, page, data, question, estimand, estimate, se, estimator, expect = c(下限, 上限))` を必ず呼ぶ。`expect` は公表値か、いまの推定値の近くの狭い範囲。パッケージの更新で既定値や計算が変わったら CI が止まる
+- `record("<key>", method, page, data, question, estimand, estimate, se, estimator, expect = c(下限, 上限))` を必ず呼ぶ。推定量に固有の区間があるなら `ci = c(下限, 上限)` と `ci_label` も書く（ダッシュボードは ±1.96×se の代わりにそれを出す）。`expect` は公表値か、いまの推定値の近くの狭い範囲。パッケージの更新で既定値や計算が変わったら CI が止まる
 - ブラウザで試す例は、作ったデータ（シミュレーション）と、基本の R か numpy・pandas・statsmodels で書く（読者の読み込みを軽くするため）。Python のパッケージは import すると自動で読み込まれるので、front matter に `pyodide:` を書かない。webR でパッケージが要るときだけ `webr: packages: [...]` を書く
 - 入力のスライダーは OJS（`viewof x = Inputs.range(...)`、`//| echo: false`）で作り、webR のブロックに `#| input:` と `#| autorun: true` を付ける
 - 文章は常体（だ・である）。1文に1つのことを書き、主張には参考文献を付ける。図は `R/setup.R` の色（`col_main`・`col_second`）を使い、凡例は2系列以上のときだけ付ける

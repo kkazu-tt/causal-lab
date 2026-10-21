@@ -290,6 +290,6 @@ print(f"推定した AMCE: {fit.params['x']:.3f}  95%信頼区間: [{lo:.3f}, {h
 ## 参考文献
 
 - Abramson, S. F., Koçak, K., & Magazinnik, A. (2022). What do we learn about voter preferences from conjoint experiments? *American Journal of Political Science*, 66(4), 1008–1020.
-- de la Cuesta, B., Egami, N., & Imai, K. (2022). Experimental design and statistical inference for conjoint analysis: The essential role of population distribution. *Political Analysis*, 30(1), 19–45.
+- de la Cuesta, B., Egami, N., & Imai, K. (2022). Improving the external validity of conjoint analysis: The essential role of profile distribution. *Political Analysis*, 30(1), 19–45.
 - Hainmueller, J., Hopkins, D. J., & Yamamoto, T. (2014). Causal inference in conjoint analysis: Understanding multidimensional choices via stated preference experiments. *Political Analysis*, 22(1), 1–30.
 - Leeper, T. J., Hobolt, S. B., & Tilley, J. (2020). Measuring subgroup preferences in conjoint experiments. *Political Analysis*, 28(2), 207–221.
