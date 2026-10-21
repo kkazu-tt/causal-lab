@@ -1,0 +1,12 @@
+# gitleaks の設定。既定の規則をすべて使い、誤検知だけを狭く除く。
+[extend]
+useDefault = true
+
+# Cloudflare Web Analytics の beacon の token は、Cloudflare の仕様で全ページの HTML に載る公開の値（秘密ではない）。
+# _analytics.html の data-cf-beacon の行だけを除く。ほかのファイルやほかの行に同じ形の値が出れば、これまでどおり検出する。
+[[allowlists]]
+description = "Cloudflare Web Analytics の公開の beacon token"
+condition = "AND"
+paths = ['''(^|/)_analytics\.html$''']
+regexTarget = "line"
+regexes = ['''data-cf-beacon=''']
