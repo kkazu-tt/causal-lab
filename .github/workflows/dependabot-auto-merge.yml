@@ -3,6 +3,7 @@ name: Dependabot auto-merge
 # PR の検査（Build and deploy の build ジョブ）が通った Dependabot の更新のうち、npm（wrangler）の minor と patch だけを
 # 自動でマージし、配備まで流す。次の PR はマージしない。skill dependabot-pr-triage の手順で確かめてからマージする。
 # - major を含む（PR の検査で試されない工程を変えることがある）
+# - update-type が無く（cooldown を経ていない）、上げた先の版が公開から dependabot.yml の cooldown の日数たっていない
 # - package.json と package-lock.json のほかを変える（Actions の更新。この権限でワークフローのファイルを変えられるかは確かめていない）
 # - Dependabot 以外のコミットが混ざっている、検査のあとに先頭が変わった
 # 公開のリポジトリなので GitHub の自動マージの機能も使えるが、必須の検査を決めるブランチの保護が要るので、
@@ -47,6 +48,7 @@ jobs:
           # 依存ごとに「種類 名前」を1行ずつ出す（種類は major・minor・patch・unknown）。種類はコミットの本文の update-type で
           # 決める。間接依存の更新など update-type の無い依存は、題の「bump <名前> from A to B」か本文の
           # 「Updates `<名前>` from A to B」の版で決め、major が変わるか、0.x で minor が変わるなら major とする。
+          # 版で決めた依存は、3つ目の欄に上げた先の版 B を出す（cooldown を経ていないので、下で公開日時を確かめる）。
           update_types() {
             awk '
               function kind(a, b,   x, y) {
@@ -65,9 +67,9 @@ jobs:
               END {
                 if (n == 0) print "unknown"
                 for (i = 1; i <= n; i++) {
-                  k = type[i]
-                  if (k == "") k = (dep[i] in to) ? kind(from[dep[i]], to[dep[i]]) : "unknown"
-                  print k, dep[i]
+                  if (type[i] != "") { print type[i], dep[i]; continue }
+                  if (dep[i] in to) print kind(from[dep[i]], to[dep[i]]), dep[i], to[dep[i]]
+                  else print "unknown", dep[i]
                 }
               }'
           }
@@ -87,11 +89,18 @@ jobs:
           ...
 
           Signed-off-by: dependabot[bot] <support@github.com>'
-          assert_types "$example" "minor zod"
-          assert_types "${example//4.6.7/5.0.0}" "major zod"
-          assert_types "${example//from 4.4.3 to 4.6.7/from 0.4.3 to 0.6.7}" "major zod"
+          assert_types "$example" "minor zod 4.6.7"
+          assert_types "${example//4.6.7/5.0.0}" "major zod 5.0.0"
+          assert_types "${example//from 4.4.3 to 4.6.7/from 0.4.3 to 0.6.7}" "major zod 0.6.7"
           assert_types "${example//from 4.4.3 to 4.6.7/}" "unknown zod"
           assert_types "$example"$'\n''  update-type: version-update:semver-major' "major zod"
+          # npm view <名前>@<版> time --json（版ごとの公開日時）を受け取り、<版> が公開から <日数> たっていれば真。読めなければ偽。
+          aged() { jq -e --arg v "$1" --argjson d "$2" '(.[$v] // empty) | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601 | now - . >= $d * 86400' > /dev/null; }
+          # 自己検査: zod 4.6.7 の実際の公開日時（2026-10-12）は3日より前。今の時刻と、公開日時の無いものは偽。
+          aged 4.6.7 3 <<<'{"4.6.7":"2026-10-12T16:29:37.778Z"}' || { echo "::error::公開日時の判定の自己検査が落ちた（古い版を新しいと読んだ）"; exit 1; }
+          if aged 4.6.7 3 <<<"{\"4.6.7\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}" || aged 4.6.7 3 <<<'{}'; then
+            echo "::error::公開日時の判定の自己検査が落ちた（新しい版か、公開日時の無いものを古いと読んだ）"; exit 1
+          fi
           [[ "$PR" =~ ^[0-9]+$ ]] || { echo "PR が見つからない"; exit 0; }
           pr="$(gh api "repos/${REPO}/pulls/${PR}")"
           [ "$(jq -r .user.login <<<"$pr")" = "dependabot[bot]" ] || skip "作成者が Dependabot でない"
@@ -105,6 +114,18 @@ jobs:
           types="$(gh api "repos/${REPO}/commits/${SHA}" --jq .commit.message | update_types)"
           if grep -q '^unknown' <<<"$types"; then skip "更新の種類を読めない（$(tr '\n' ' ' <<<"$types")）"; fi
           if grep -qvE '^(minor|patch) ' <<<"$types"; then skip "major を含む（$(tr '\n' ' ' <<<"$types")）"; fi
+          # update-type の無い更新（間接依存のセキュリティ更新など）は Dependabot の cooldown を経ていないので、上げた先の版が
+          # 公開から dependabot.yml の cooldown の日数（無ければ3日）たっているかを npm のレジストリで確かめ、足りなければ見送る。
+          # 見送った PR は、日数が過ぎても自動ではもう一度判定されない（Dependabot が作り直すか、PR の検査をやり直すと判定される）。
+          while read -r _ name version; do
+            [ -n "$version" ] || continue
+            if [ -z "${cooldown:-}" ]; then
+              cooldown="$(gh api "repos/${REPO}/contents/.github/dependabot.yml" --jq .content < /dev/null | base64 -d | sed -n 's/^ *default-days: *\([0-9][0-9]*\).*/\1/p' | sort -n | tail -n 1)"
+              cooldown="${cooldown:-3}"
+            fi
+            npm view "${name}@${version}" time --json < /dev/null | aged "$version" "$cooldown" \
+              || skip "${name}@${version} は公開から ${cooldown} 日たっていないか、公開日時を読めない（update-type が無く、cooldown を経ていない）"
+          done <<<"$types"
           if ! gh pr merge "$PR" -R "$REPO" --merge --match-head-commit "$SHA"; then
             # 同時に通った別の PR が先にマージされると、lockfile が衝突して落ちる（owndraft の 2026-10-19 の #38、10-24 の #50）。
             # 作者が Dependabot だけの PR は Dependabot が数分で作り直し、その検査が通るとここにもう一度来るので、失敗にしない。
