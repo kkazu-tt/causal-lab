@@ -10,6 +10,7 @@ on:  # zizmor: ignore[dangerous-triggers]
   workflow_run:
     workflows:
       - Build and deploy
+      - Dependabot auto-merge
     types: [completed]
   # 後の実行が成功した失敗の Issue を閉じ、workflow_run の届かない失敗に Issue を立てる見回り（close のジョブ）。12:35 JST。
   schedule:

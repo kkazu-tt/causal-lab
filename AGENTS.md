@@ -67,6 +67,7 @@ uv run --no-project --with playwright python scripts/check_live.py http://127.0.
 - 公開は CI（`.github/workflows/build-deploy.yml`）だけが、main からの実行のときに行う。ジョブは build（R・Python・playwright。合鍵なし）→ deploy（合鍵あり。lockfile で固定した wrangler だけ）→ verify（合鍵なし。本番の environment.html が成果物と同じかと check_live.py）→ rollback（合鍵あり。deploy か verify が落ちたときだけ、控えた版に戻し、戻ったかを確かめる）。合鍵は secret の `CLOUDFLARE_API_TOKEN`・`CLOUDFLARE_ACCOUNT_ID`
 - Python のパッケージは CI で公開から3日たった版だけを使う（`UV_EXCLUDE_NEWER`）。R のパッケージにはこの待ちが無い
 - 手元からの配備（`npx wrangler deploy`、サンドボックスの外）は、CI が使えないときの非常手段に限る
+- Dependabot の PR は、PR の `Build and deploy` が通ると、npm（wrangler）の minor・patch だけを `dependabot-auto-merge.yml` がマージして配備を起動する。Actions の更新は skill `dependabot-pr-triage` の手順で確かめてからマージし、major は持ち主が判断する
 - main への直接の push で運用する。push の前に `quarto render` と2つの検査を手元で通す
 - ステージは自分が触ったパスを名指しする。検証が済んだ作業はすぐにコミットする
 - 持ち主の非公開ノートや授業資料を本文に写さない。本文と例は公開の文献とデータで書く

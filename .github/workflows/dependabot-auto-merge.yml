@@ -1,0 +1,124 @@
+name: Dependabot auto-merge
+
+# PR の検査（Build and deploy の build ジョブ）が通った Dependabot の更新のうち、npm（wrangler）の minor と patch だけを
+# 自動でマージし、配備まで流す。次の PR はマージしない。skill dependabot-pr-triage の手順で確かめてからマージする。
+# - major を含む（PR の検査で試されない工程を変えることがある）
+# - package.json と package-lock.json のほかを変える（Actions の更新。この権限でワークフローのファイルを変えられるかは確かめていない）
+# - Dependabot 以外のコミットが混ざっている、検査のあとに先頭が変わった
+# 公開のリポジトリなので GitHub の自動マージの機能も使えるが、必須の検査を決めるブランチの保護が要るので、
+# owndraft などほかのリポジトリと同じ workflow_run の形にする。
+# zizmor の dangerous-triggers は見直し済み（2026-10-31）: PR 側のコードを checkout も実行もせず、作者が dependabot[bot] であること・
+# 同じリポジトリのブランチであること・コミットの作者・変更したファイル・更新の種類を API で確かめてからマージするだけ。
+on:  # zizmor: ignore[dangerous-triggers]
+  workflow_run:
+    workflows: [Build and deploy]
+    types: [completed]
+
+permissions: {}
+
+# PR ごとに1つずつ。Build and deploy は main への push と定時でも動くので、全体で1つにすると、
+# 待っている PR の実行が、後から来た何もしない実行に押し出されて取り消される。
+concurrency:
+  group: dependabot-auto-merge-${{ github.event.workflow_run.pull_requests[0].number }}
+  cancel-in-progress: false
+
+jobs:
+  merge:
+    if: >-
+      github.event.workflow_run.conclusion == 'success'
+      && github.event.workflow_run.event == 'pull_request'
+      && github.event.workflow_run.actor.login == 'dependabot[bot]'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: write
+    steps:
+      - name: 条件を満たせばマージして配備を起動する
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.workflow_run.pull_requests[0].number }}
+          SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          skip() { echo "::notice::#${PR} は自動ではマージしない: $1"; exit 0; }
+          # 依存ごとに「種類 名前」を1行ずつ出す（種類は major・minor・patch・unknown）。種類はコミットの本文の update-type で
+          # 決める。間接依存の更新など update-type の無い依存は、題の「bump <名前> from A to B」か本文の
+          # 「Updates `<名前>` from A to B」の版で決め、major が変わるか、0.x で minor が変わるなら major とする。
+          update_types() {
+            awk '
+              function kind(a, b,   x, y) {
+                sub(/^v/, "", a); sub(/^v/, "", b)
+                if (a !~ /^[0-9]+(\.[0-9]+)*$/ || b !~ /^[0-9]+(\.[0-9]+)*$/) return "unknown"
+                split(a, x, "."); split(b, y, ".")
+                if (x[1] != y[1] || (x[1] == 0 && x[2] != y[2])) return "major"
+                return x[2] != y[2] ? "minor" : "patch"
+              }
+              NR == 1 && match($0, /[Bb]ump [^ ]+ from [^ ]+ to [^ ]+/) {
+                split(substr($0, RSTART, RLENGTH), w, " "); from[w[2]] = w[4]; to[w[2]] = w[6]
+              }
+              /^Updates `[^`]+` from [^ ]+ to [^ ]+/ { name = $2; gsub(/`/, "", name); from[name] = $4; to[name] = $6 }
+              /^ *- dependency-name: / { n++; dep[n] = $3; gsub(/"/, "", dep[n]) }
+              /^ *update-type: / { t = $2; sub(/^version-update:semver-/, "", t); type[n] = t }
+              END {
+                if (n == 0) print "unknown"
+                for (i = 1; i <= n; i++) {
+                  k = type[i]
+                  if (k == "") k = (dep[i] in to) ? kind(from[dep[i]], to[dep[i]]) : "unknown"
+                  print k, dep[i]
+                }
+              }'
+          }
+          # 自己検査: 判定を変えて実例（zod の間接依存の更新のコミット。update-type が無い）を読み違えたら、ここで落ちる。
+          assert_types() { [ "$(update_types <<<"$1" | tr '\n' ' ')" = "$2 " ] || { echo "::error::更新の種類の判定の自己検査が落ちた（期待: $2）"; exit 1; }; }
+          example='build(deps-dev): bump zod from 4.4.3 to 4.6.7
+
+          Bumps [zod](https://github.com/colinhacks/zod) from 4.4.3 to 4.6.7.
+          - [Release notes](https://github.com/colinhacks/zod/releases)
+          - [Commits](https://github.com/colinhacks/zod/compare/v4.4.3...v4.6.7)
+
+          ---
+          updated-dependencies:
+          - dependency-name: zod
+            dependency-version: 4.6.7
+            dependency-type: indirect
+          ...
+
+          Signed-off-by: dependabot[bot] <support@github.com>'
+          assert_types "$example" "minor zod"
+          assert_types "${example//4.6.7/5.0.0}" "major zod"
+          assert_types "${example//from 4.4.3 to 4.6.7/from 0.4.3 to 0.6.7}" "major zod"
+          assert_types "${example//from 4.4.3 to 4.6.7/}" "unknown zod"
+          assert_types "$example"$'\n''  update-type: version-update:semver-major' "major zod"
+          [[ "$PR" =~ ^[0-9]+$ ]] || { echo "PR が見つからない"; exit 0; }
+          pr="$(gh api "repos/${REPO}/pulls/${PR}")"
+          [ "$(jq -r .user.login <<<"$pr")" = "dependabot[bot]" ] || skip "作成者が Dependabot でない"
+          [ "$(jq -r .state <<<"$pr")" = open ] || skip "閉じている"
+          [ "$(jq -r .head.repo.full_name <<<"$pr")" = "$REPO" ] || skip "別のリポジトリのブランチ"
+          [ "$(jq -r .head.sha <<<"$pr")" = "$SHA" ] || skip "検査のあとに先頭が変わった"
+          authors="$(gh api "repos/${REPO}/pulls/${PR}/commits" --jq '[.[].author.login] | unique | join(",")')"
+          [ "$authors" = "dependabot[bot]" ] || skip "Dependabot 以外のコミットがある（${authors}）"
+          files="$(gh api --paginate "repos/${REPO}/pulls/${PR}/files" --jq '.[].filename')"
+          if grep -qvxE 'package\.json|package-lock\.json' <<<"$files"; then skip "package.json と package-lock.json のほかも変えている"; fi
+          types="$(gh api "repos/${REPO}/commits/${SHA}" --jq .commit.message | update_types)"
+          if grep -q '^unknown' <<<"$types"; then skip "更新の種類を読めない（$(tr '\n' ' ' <<<"$types")）"; fi
+          if grep -qvE '^(minor|patch) ' <<<"$types"; then skip "major を含む（$(tr '\n' ' ' <<<"$types")）"; fi
+          if ! gh pr merge "$PR" -R "$REPO" --merge --match-head-commit "$SHA"; then
+            # 同時に通った別の PR が先にマージされると、lockfile が衝突して落ちる（owndraft の 2026-10-19 の #38、10-24 の #50）。
+            # 作者が Dependabot だけの PR は Dependabot が数分で作り直し、その検査が通るとここにもう一度来るので、失敗にしない。
+            for _ in 1 2 3; do
+              mergeable="$(gh pr view "$PR" -R "$REPO" --json mergeable --jq .mergeable)"
+              [ "$mergeable" != UNKNOWN ] && break
+              sleep 10
+            done
+            if [ "$mergeable" = CONFLICTING ]; then
+              echo "::notice::#${PR} は先にマージされた変更と衝突した。Dependabot が作り直したあとの検査で、もう一度マージを試みる。"
+              exit 0
+            fi
+            exit 1
+          fi
+          # この権限でのマージは push のワークフローを起こさないので、作り直しと配備を明示的に起動する。
+          gh workflow run build-deploy.yml -R "$REPO" --ref main
+          echo "#${PR} をマージし、build-deploy.yml を起動した"
