@@ -104,9 +104,11 @@ jobs:
             --jq '.[] | select(.title | test("^失敗: .+（[0-9a-f]{7}）$")) | [.number, .createdAt, (.title | sub("^失敗: "; "") | sub("（[0-9a-f]{7}）$"; ""))] | @tsv' |
           while IFS=$'\t' read -r number created workflow; do
             # ジョブがすべて条件で飛ばされた実行（自動マージの対象外の PR など）は skipped になるので、数えない。
-            IFS=$'\t' read -r conclusion started url < <(gh run list -R "$REPO" --workflow "$workflow" --branch main --status completed --limit 20 \
-              --json conclusion,createdAt,url --jq '[.[] | select(.conclusion != "skipped")][0] | [.conclusion, .createdAt, .url] | @tsv' < /dev/null) || continue
-            if [ "$conclusion" = success ] && [[ "$started" > "$created" ]]; then
+            # Issue と比べるのは、実行が終わった時刻（updatedAt）。やり直し（re-run）は元の createdAt のままなので、作成時刻で比べると、
+            # Issue の後にやり直して成功しても閉じない（causal-lab #6 は 2026-11-10 のやり直しの成功のあとも、11-11 の見回りまで開いたままだった）。
+            IFS=$'\t' read -r conclusion finished url < <(gh run list -R "$REPO" --workflow "$workflow" --branch main --status completed --limit 20 \
+              --json conclusion,updatedAt,url --jq '[.[] | select(.conclusion != "skipped")][0] | [.conclusion, .updatedAt, .url] | @tsv' < /dev/null) || continue
+            if [ "$conclusion" = success ] && [[ "$finished" > "$created" ]]; then
               gh issue close "$number" -R "$REPO" --reason completed --comment "後の実行が成功したので閉じます: $url" < /dev/null
               echo "閉じた: #$number $workflow"
             fi
